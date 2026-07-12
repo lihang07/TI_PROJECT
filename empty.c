@@ -34,23 +34,26 @@
 #include "mylib/Motor.h"
 #include "mylib/delay.h"
 #include "mylib/usart.h"
-
+#include "mylib/find.h"
 int main(void)
 {
     // 系统初始化（由syscfg生成）
     SYSCFG_DL_init();
+    uint8_t ir[8];
+    int a = 0;
+    
 
-    // 使能电机
-    Motor_Enable();
 
-    // 简单测试：左轮PWM 50%，右轮PWM 50%
-    Motor_SetSpeed(50, 50);
 
-    // 让电机前进
-   Motor_Spin(1);
+
+    
 
     while (1) {
-        
+        IR_Read(ir);
+        a = IR_IsAllWhite(ir);
+       UART_SendByte(UART_XG_INST,a);
+       // UART_SendBytes(UART_XG_INST,ir,8);
+        delay_ms(300);
        
    
     }
