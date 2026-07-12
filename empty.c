@@ -35,6 +35,7 @@
 #include "mylib/delay.h"
 #include "mylib/usart.h"
 #include "mylib/find.h"
+#include "mylib/oled.h"
 
 /*
  * ==================== 循迹控制 —— 比例控制法 ====================
@@ -64,7 +65,7 @@
 #define DIRECTION_SWAP  0
 
 /* 基础速度：建议从 25 开始，跑稳后再加快 */
-#define BASE_SPEED      25
+#define BASE_SPEED      55
 
 /* 转向灵敏度：值越大转弯越猛（建议 3~6） */
 #define TURN_GAIN       4
@@ -79,6 +80,16 @@
 int main(void)
 {
     SYSCFG_DL_init();
+
+    /* ==================== OLED 测试代码 ==================== */
+    OLED_Init();
+    OLED_ShowString(0, 0, (uint8_t *)"OLED Test OK!");
+
+    delay_ms(2000);  /* 显示2秒后清屏，进入循迹程序 */
+
+    OLED_Clear();
+    OLED_ShowString(0, 0, (uint8_t *)"MOTOR READY");
+    /* ==================== OLED 测试结束 ==================== */
 
     uint8_t  ir[8];          /* 8路传感器数据 */
     int16_t  position;       /* 黑线位置（-7 ~ +7） */
