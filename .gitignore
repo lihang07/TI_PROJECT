@@ -1,0 +1,22 @@
+# ===== CCS / TI 工程 =====
+
+# Build 输出
+Debug/
+Release/
+
+# 编译中间文件
+*.o
+*.d
+*.map
+*.out
+
+# 临时文件
+*.log
+*.tmp
+
+# CCS 工作空间（不要上传）
+.metadata/
+
+# macOS / Windows 杂项
+.DS_Store
+Thumbs.db
