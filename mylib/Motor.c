@@ -14,7 +14,7 @@ static int16_t g_target_right_speed = 0;
 static uint16_t g_acceleration = 5;
 
 // PWM周期值（对应syscfg中的timerCount=3，实际PWM周期+1）
-#define PWM_PERIOD  3
+#define PWM_PERIOD  100
 
 // ==================== 内部函数声明 ====================
 static void Motor_SetLeftDirection(uint8_t direction);
