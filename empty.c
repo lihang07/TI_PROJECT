@@ -33,51 +33,25 @@
 #include "ti_msp_dl_config.h"
 #include "mylib/Motor.h"
 #include "mylib/delay.h"
-#include "mylib/key.h"
-#include "mylib/find.h"
 #include "mylib/usart.h"
+
 int main(void)
 {
-    
+    // 系统初始化（由syscfg生成）
     SYSCFG_DL_init();
- 
-    uint8_t ir[8] ;
-    uint8_t a = 0;
- //   DL_GPIO_initDigitalInput(XG_G8_IOMUX);
-//     int i = 0;
-//    Key_t key1 = {KEY_PORT,KEY_PIN1_PIN,1};
+
+    // 使能电机
+    Motor_Enable();
+
+    // 简单测试：左轮PWM 50%，右轮PWM 50%
+    Motor_SetSpeed(50, 50);
+
+    // 让电机前进
+   Motor_Spin(1);
+
     while (1) {
-    // if(key_scan(&key1)==1)
-    // {
-    //     if (i == 0 )i= 1;
-    //     else if(i == 1) i = 0;
-    // }    
-
-    // if(i == 0)
-    // {
-    //     Motor_forward();
-    //     Motor_ON_PWM();
-    // }
-    // else {
-    // Motor_backward();
-    // Motor_ON_PWM();
-    // }
- 
-    // if(( DL_GPIO_readPins(XG_G8_PORT,XG_G8_PIN))==0)
-    // {
-    //     DL_GPIO_setPins(LED_PORT,LED_PIN22_PIN);
-    //     delay_ms(100);
-    //     DL_GPIO_clearPins(LED_PORT,LED_PIN22_PIN);
-    //     delay_ms(100);
         
-    // }
- //   UART_SendByte(UART_XG_INST,a);
- //   UART_SendByte(UART_XG_INST,'A');
-    IR_Read(ir);
-    UART_SendBytes(UART_XG_INST,ir,8);
-    delay_ms(100);
-
-
-    
+       
+   
     }
 }

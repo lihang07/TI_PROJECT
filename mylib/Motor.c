@@ -13,8 +13,8 @@ static int16_t g_target_right_speed = 0;
 // 加速度值（每周期增加/减少的速度量）
 static uint16_t g_acceleration = 5;
 
-// PWM周期值（对应syscfg中的timerCount=2，实际PWM周期+1）
-#define PWM_PERIOD  1800
+// PWM周期值（对应syscfg中的timerCount=3，实际PWM周期+1）
+#define PWM_PERIOD  3
 
 // ==================== 内部函数声明 ====================
 static void Motor_SetLeftDirection(uint8_t direction);
@@ -77,8 +77,6 @@ void Motor_Brake(void)
 void Motor_Forward(void)
 {
     Motor_Enable();
-    Motor_SetLeftDirection(0);   // 左轮正转
-    Motor_SetRightDirection(0);  // 右轮正转
     Motor_SetSpeed(MOTOR_SPEED_DEFAULT, MOTOR_SPEED_DEFAULT);
 }
 
@@ -87,9 +85,7 @@ void Motor_Forward(void)
 void Motor_Backward(void)
 {
     Motor_Enable();
-    Motor_SetLeftDirection(1);   // 左轮反转
-    Motor_SetRightDirection(1);  // 右轮反转
-    Motor_SetSpeed(MOTOR_SPEED_DEFAULT, MOTOR_SPEED_DEFAULT);
+    Motor_SetSpeed(-MOTOR_SPEED_DEFAULT, -MOTOR_SPEED_DEFAULT);
 }
 
 // ==================== 速度控制（核心PWM调速） ====================
@@ -186,14 +182,10 @@ void Motor_Spin(int16_t direction)
 
     if (direction < 0) {
         // 原地左转：左轮反转，右轮正转
-        Motor_SetLeftDirection(1);   // 左轮反转
-        Motor_SetRightDirection(0);  // 右轮正转
-        Motor_SetSpeed(MOTOR_SPEED_DEFAULT, MOTOR_SPEED_DEFAULT);
+        Motor_SetSpeed(-MOTOR_SPEED_DEFAULT, MOTOR_SPEED_DEFAULT);
     } else {
         // 原地右转：左轮正转，右轮反转
-        Motor_SetLeftDirection(0);   // 左轮正转
-        Motor_SetRightDirection(1);  // 右轮反转
-        Motor_SetSpeed(MOTOR_SPEED_DEFAULT, MOTOR_SPEED_DEFAULT);
+        Motor_SetSpeed(MOTOR_SPEED_DEFAULT, -MOTOR_SPEED_DEFAULT);
     }
 }
 
@@ -250,9 +242,8 @@ void Motor_SpeedRamp(void)
         }
     }
 
-    // 更新PWM输出
-    Motor_SetPWM(0, g_left_speed);
-    Motor_SetPWM(1, g_right_speed);
+    // 更新PWM输出（同时处理方向）
+    Motor_SetSpeed(g_left_speed, g_right_speed);
 }
 
 // ==================== PID控制（预留实现） ====================
@@ -373,10 +364,17 @@ static void Motor_SetPWM(uint8_t channel, int16_t speed)
 
     // 设置对应通道的PWM
     if (channel == 0) {
-        DL_TimerA_setCaptureCompareValue(PWM_0_INST, compare_value, GPIO_PWM_0_C0_IDX);
-        DL_TimerG_startCounter(PWM_0_INST);
+        // 左轮PWM - 使用TIMA1 CC0 (PB4)
+        DL_TimerA_setCaptureCompareValue(PWM_0_INST, compare_value, DL_TIMER_CC_0_INDEX);
+        // 确保Timer正在运行
+        if (!DL_TimerA_isRunning(PWM_0_INST)) {
+            DL_TimerA_startCounter(PWM_0_INST);
+        }
     } else {
-        DL_TimerA_setCaptureCompareValue(PWM_0_INST, compare_value, GPIO_PWM_0_C1_IDX);
-        DL_TimerG_startCounter(PWM_0_INST);
+        // 右轮PWM - 使用TIMA1 CC1 (PB5)
+        DL_TimerA_setCaptureCompareValue(PWM_0_INST, compare_value, DL_TIMER_CC_1_INDEX);
+        if (!DL_TimerA_isRunning(PWM_0_INST)) {
+            DL_TimerA_startCounter(PWM_0_INST);
+        }
     }
 }
