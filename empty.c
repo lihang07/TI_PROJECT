@@ -36,6 +36,7 @@
 #include "mylib/usart.h"
 #include "mylib/find.h"
 #include "mylib/oled.h"
+// #include "mylib/oledfont.h"
 
 /*
  * ==================== 循迹控制 —— 比例控制法 ====================
@@ -76,19 +77,23 @@
 /* 循环间隔(ms)：控制采样频率，太快会抖动 */
 #define LOOP_DELAY_MS   5
 
+//===================== OLED初始化 ==================*/
+
 
 int main(void)
 {
     SYSCFG_DL_init();
+OLED_Init();
+OLED_ColorTurn(0);//0 正常 1 反转
+OLED_DisplayTurn(0); //0 正常 1 反转
+OLED_Refresh();
 
     /* ==================== OLED 测试代码 ==================== */
-    OLED_Init();
-    OLED_ShowString(0, 0, (uint8_t *)"OLED Test OK!");
+      /* 显示2秒后清屏，进入循迹程序 */
 
-    delay_ms(2000);  /* 显示2秒后清屏，进入循迹程序 */
-
-    OLED_Clear();
-    OLED_ShowString(0, 0, (uint8_t *)"MOTOR READY");
+    // OLED_Clear();
+    // OLED_ShowString(0, 0, (u8 *)"MOTOR READY",16);
+    // OLED_Refresh();
     /* ==================== OLED 测试结束 ==================== */
 
     uint8_t  ir[8];          /* 8路传感器数据 */
@@ -102,7 +107,10 @@ int main(void)
     lost_count = 0;
 
     while (1) {
-
+    OLED_Clear();
+    OLED_ShowString(0, 0, (u8 *)"MOTOR READY",16);
+    OLED_Refresh();
+    
         /* ---- 步骤1：读取传感器 ---- */
         IR_Read(ir);
 
