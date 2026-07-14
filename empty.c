@@ -36,6 +36,12 @@
 #include "mylib/usart.h"
 #include "mylib/find.h"
 #include "mylib/oled.h"
+#include "mylib/icm42688.h"
+#include "mylib/IMU.h"
+#include "mylib/I2C_communication.h"
+#include <stdio.h>
+
+
 // #include "mylib/oledfont.h"
 
 /*
@@ -77,6 +83,84 @@
 /* 循环间隔(ms)：控制采样频率，太快会抖动 */
 #define LOOP_DELAY_MS   5
 
+
+//================= 陀螺仪部分 ==================/
+
+
+volatile float ypr[3];  // 存储姿态角
+/* fputc: 重写标准库函数，实现printf输出到UART
+ * 参数: ch - 要发送的字符, stream - 文件流（未使用）
+ * 返回值: 返回发送的字符
+ * 实现: 等待UART空闲后发送数据，兼容MSP432的UART驱动
+ */
+int fputc(int ch, FILE *stream)
+{
+    while (DL_UART_isBusy(UART_ICM_INST) == true) {}
+    DL_UART_Main_transmitData(UART_ICM_INST, ch);
+    return ch;
+}
+
+/* fputs: 重写标准库函数，实现字符串输出到UART
+ * 参数: s - 要发送的字符串, stream - 文件流（未使用）
+ * 返回值: 返回发送的字符长度
+ * 实现: 逐字符发送,每个字符前都等待UART空闲
+ */
+int fputs(const char *restrict s, FILE *restrict stream)
+{
+    uint16_t len = 0;
+    while (*s) {
+        while (DL_UART_isBusy(UART_ICM_INST) == true) {}
+        DL_UART_Main_transmitData(UART_ICM_INST, *s++);
+        len++;
+    }
+    return len;
+}
+
+/* puts: 重写标准库函数(简化实现)
+ * 参数: _ptr - 字符串指针
+ * 返回值: 固定返回0
+ * 说明: 标准puts会额外发送换行符,本实现未做,保持简单
+ */
+int puts(const char *_ptr) {    while (*_ptr) {
+        while (DL_UART_isBusy(UART_ICM_INST) == true) {}
+        DL_UART_Main_transmitData(UART_ICM_INST, *_ptr++);
+    }
+    /* 发送换行符 */
+    while (DL_UART_isBusy(UART_ICM_INST) == true) {}
+    DL_UART_Main_transmitData(UART_ICM_INST, '\n');
+    return 0; }
+
+/* Timer_Init: 定时器初始化
+ * 功能: 配置定时器中断,用于周期性读取IMU数据
+ * 说明: 定时器中断频率由sysconfig配置,本项目使用TIMER_0
+ *       中断频率应与IMU的ODR(输出数据率)匹配
+ */
+void Timer_Init(void)
+{
+    DL_TimerG_enableInterrupt(TIMER_0_INST, DL_TIMERG_INTERRUPT_ZERO_EVENT);
+    NVIC_ClearPendingIRQ(TIMER_0_INST_INT_IRQN);
+    NVIC_EnableIRQ(TIMER_0_INST_INT_IRQN);
+}
+
+/* TIMER_0_INST_IRQHandler: 定时器0中断服务程序
+ * 功能: 定时触发IMU数据读取和姿态解算
+ * 说明: 此中断每100Hz(10ms)触发一次
+ *       调用IMU_getYawPitchRoll更新姿态角
+ *       更新后的角度存储在全局变量ypr中,供main函数读取显示
+ */
+void TIMER_0_INST_IRQHandler(void)
+{
+    switch (DL_TimerG_getPendingInterrupt(TIMER_0_INST)) {
+    case DL_TIMER_IIDX_ZERO:
+        IMU_getYawPitchRoll((float *)ypr);  // 获取当前姿态角
+        break;
+    default:
+        break;
+    }
+}
+
+
+
 //===================== OLED初始化 ==================*/
 
 
@@ -87,6 +171,31 @@ OLED_Init();
 OLED_ColorTurn(0);//0 正常 1 反转
 OLED_DisplayTurn(0); //0 正常 1 反转
 OLED_Refresh();
+
+/* 初始化ICM42688传感器
+     * 如果初始化失败,打印错误信息并进入死循环 */
+     /* 在empty.c的main函数中，ICM42688_Init()之前添加 */
+    DL_I2C_enableController(I2C_1_INST);
+    if (ICM42688_Init() != 0) {
+        printf("ICM42688 init FAILED!\r\n");
+        while (1) {}  // 死循环,等待调试
+    }
+    printf("ICM42688 OK\r\n");
+
+    /* 初始化IMU姿态解算模块
+     * 包括: ICM42688再次初始化、四元数初值设置等 */
+    IMU_init();
+   
+
+    /* 启动定时器,开始周期性中断进行姿态更新
+     * 注意: 此时定时器中断已使能,10ms一次中断更新ypr数组 */
+    Timer_Init();
+ 
+    /* 等待100ms确保传感器数据稳定 */
+    delay_ms(100);
+    
+    printf("Yaw(dps)  Pitch(dps)  Roll(dps)\r\n");
+
 
     /* ==================== OLED 测试代码 ==================== */
       /* 显示2秒后清屏，进入循迹程序 */
@@ -107,6 +216,7 @@ OLED_Refresh();
     lost_count = 0;
 
     while (1) {
+    printf("%8.2f  %10.2f  %9.2f\r\n", ypr[0], ypr[1], ypr[2]);
     OLED_Clear();
     OLED_ShowString(0, 0, (u8 *)"MOTOR READY",16);
     OLED_Refresh();
