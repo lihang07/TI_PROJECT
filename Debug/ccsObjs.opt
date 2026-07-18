@@ -1,0 +1,15 @@
+"./empty.o"
+"./ti_msp_dl_config.o"
+"./startup_mspm0g350x_ticlang.o"
+"./mylib/I2C_communication.o"
+"./mylib/IMU.o"
+"./mylib/Motor.o"
+"./mylib/delay.o"
+"./mylib/find.o"
+"./mylib/icm42688.o"
+"./mylib/key.o"
+"./mylib/oled.o"
+"./mylib/usart.o"
+-l"./device_linker.cmd"
+-ldevice.cmd.genlibs
+-llibc.a
