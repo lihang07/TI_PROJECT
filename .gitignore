@@ -1,0 +1,7 @@
+Debug/
+build/
+*.o
+*.out
+*.map
+*.elf
+*.axf
