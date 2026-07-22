@@ -125,7 +125,7 @@ void Motor_SetSpeed(int16_t left_speed, int16_t right_speed)
     }
 
     // 设置PWM
-    printf("SetSpeed: %d, %d\r\n", left_speed, right_speed);
+    //printf("SetSpeed: %d, %d\r\n", left_speed, right_speed);
     Motor_SetPWM(0, left_speed);
     Motor_SetPWM(1, right_speed);
 }
@@ -403,6 +403,10 @@ static Motor_Encoder_t g_right_encoder = {0, 0, 0, 1};
 static int32_t g_left_last_pos = 0;
 static int32_t g_right_last_pos = 0;
 
+/* 左编码器原始累加器：直接累加QEI硬件计数值，避免整数除法截断
+ * 读取位置时再除以2（2X→1X补偿），确保慢速转动不丢脉冲 */
+static int32_t g_left_raw_accum = 0;
+
 /* QEI计数器位数（用于溢出计算） */
 #define QEI_COUNTER_BITS     16
 #define QEI_COUNTER_MAX      (1 << QEI_COUNTER_BITS)  // 65536
@@ -420,11 +424,11 @@ void TIMG8_IRQHandler(void)
         case DL_TIMER_IIDX_ZERO:
             /* 计数器归零事件（溢出）
              * 从0跳到最大值，或者从最大值跳到0
-             * 根据当前方向调整累计位置 */
+             * 根据当前方向调整累加器（原始计数值） */
             if (g_left_encoder.direction == 1) {
-                g_left_encoder.position += QEI_COUNTER_MAX;
+                g_left_raw_accum += QEI_COUNTER_MAX;
             } else {
-                g_left_encoder.position -= QEI_COUNTER_MAX;
+                g_left_raw_accum -= QEI_COUNTER_MAX;
             }
             break;
 
@@ -540,17 +544,16 @@ void Motor_Encoder_UpdateSpeed(void)
 
     g_left_last_pos = (int32_t)qei_count;
 
-    /* QEI 2X模式补偿：硬件每A/B周期计数2次，除以2得到实际脉冲数
-     * 例如：PPR=13，2X模式每转26次，除以2后每转13次 */
-    qei_delta = qei_delta / 4;
+    /* 累加原始QEI计数值（4X模式，每转52次）
+     * 不在此处做除法，避免慢速时整数截断丢失脉冲 */
+    g_left_raw_accum += qei_delta;
 
-    /* 更新位置：将本次采样得到的增量累加到累计位置 */
-    g_left_encoder.position += qei_delta;
+    /* 位置 = 累加器 / 4（4X→1X补偿，每转13次，与右轮一致） */
+    g_left_encoder.position = g_left_raw_accum / 4;
 
-    /* 计算速度（脉冲/秒）：增量 * (1000ms / 采样周期ms)
-     * 注意：此公式假设Motor_Encoder_UpdateSpeed()严格按照ENCODER_SAMPLE_MS周期调用
-     *       如果调用间隔不是ENCODER_SAMPLE_MS，速度会不准确 */
-    g_left_encoder.speed = qei_delta * (1000 / ENCODER_SAMPLE_MS);
+    /* 计算速度（脉冲/秒）：先乘后除，避免截断
+     * 原始增量 * 200 / 4 = 原始增量 * 50 */
+    g_left_encoder.speed = qei_delta * (1000 / ENCODER_SAMPLE_MS) / 4;
 
     /* 方向判断: 只在非静止时更新 */
     if (qei_delta > 0) {
@@ -656,6 +659,7 @@ int32_t Motor_GetRightEncoderPosition(void)
  *       适用于需要校准或重新计数的场景 */
 void Motor_ResetLeftEncoder(void)
 {
+    g_left_raw_accum = 0;
     g_left_encoder.position = 0;
     g_left_encoder.speed = 0;
     g_left_encoder.direction = 1;

@@ -42,7 +42,7 @@ static void delayMs(uint32_t ms)
  *       为了提高效率,只在切换到不同bank时才执行写操作 */
 static void selectBank(uint8_t bank) {
     if (bank != gCurrentBank) {
-        I2C_WriteReg(ICM42688_I2C_ADDR, ICM42688_REG_BANK_SEL, &bank, 1);
+        (void)I2C_WriteReg(ICM42688_I2C_ADDR, ICM42688_REG_BANK_SEL, &bank, 1);
         gCurrentBank = bank;
     }
 }
@@ -67,7 +67,7 @@ uint8_t ICM42688_ReadReg(uint8_t reg, uint8_t bank) {
  *   val  - 要写入的值(8位) */
 void ICM42688_WriteReg(uint8_t reg, uint8_t bank, uint8_t val) {
     selectBank(bank);
-    I2C_WriteReg(ICM42688_I2C_ADDR, reg, &val, 1);
+    (void)I2C_WriteReg(ICM42688_I2C_ADDR, reg, &val, 1);
 }
 
 /* accelSens: 计算加速度计灵敏度
@@ -164,7 +164,7 @@ int8_t ICM42688_Init(void) {
     reg = (ICM42688_MODE_LOW_NOISE<<ICM42688_PWR_GYRO_MODE_SHIFT)
         | (ICM42688_MODE_LOW_NOISE<<ICM42688_PWR_ACCEL_MODE_SHIFT);
     ICM42688_WriteReg(ICM42688_REG_PWR_MGMT0, ICM42688_BANK_0, reg);
-    delayMs(50);  /* 等待传感器稳定，50ms足够让100Hz ODR完成多个周期 */
+    delayMs(50);
     return 0;
 }
 
@@ -177,7 +177,7 @@ int8_t ICM42688_Init(void) {
  *       常用于一次性获取一组相关数据(如传感器6轴数据) */
 static void burstRead(uint8_t reg, uint8_t *buf, uint8_t len) {
     selectBank(ICM42688_BANK_0);
-    I2C_ReadReg(ICM42688_I2C_ADDR, reg, buf, len);
+    (void)I2C_ReadReg(ICM42688_I2C_ADDR, reg, buf, len);
 }
 
 /* parseTrip: 解析三轴数据(6字节->3个int16)
