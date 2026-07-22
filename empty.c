@@ -58,7 +58,7 @@ int puts(const char *_ptr) {
     static float kd = 0.14;
     static float ir_last_err = 0;
 
-    static int Timer_count = 0;
+    static volatile int Timer_count = 0;
 
     static float base_speed = 50;
 
@@ -91,8 +91,12 @@ int main(void)
     Cartask state = status_stop;
 
     OLED_Init();
+        OLED_ColorTurn(1);
+    OLED_DisplayTurn(0);
     IMU_init();
-    printf("IMU init done. Press KEY4 for ICM42688 test.\r\n");
+    OLED_Clear();
+    OLED_Refresh();
+
     /* 初始化编码器 */
     Motor_Encoder_Init();
     Motor_ResetLeftEncoder();
@@ -110,7 +114,8 @@ int main(void)
       //  printf("right encoder: %d\r\n",Motor_GetRightEncoderPosition());
       //  printf("left encoder : %d\r\n",Motor_GetLeftEncoderPosition());
       //  printf("GB2 :%d\r\n",DL_GPIO_readPins(Motor_GB2_PORT,Motor_GB2_PIN));
-      
+      OLED_ShowNum(0,0,1,1,14);
+      OLED_Refresh();
         key_status = key_read();
         if (key_status == 0) state = status_stop;
         else if (key_status == 1) state = status_task1;
@@ -289,7 +294,7 @@ void task1(void)
             }
 
             static float ypr[3];
-            IMU_getYawPitchRoll(ypr);
+            (void)IMU_getYawPitchRoll(ypr, ENCODER_SAMPLE_MS / 1000.0f);
             printf("yaw:%f pitch:%f roll:%f\r\n",ypr[0],ypr[1],ypr[2]);
             
             /* ③ 梯形速度规划：根据当前距离计算目标速度 */
@@ -328,45 +333,92 @@ void task1(void)
 
 void task2(void)
 {
+// 在你的循环里加这个
+static float yaw_sum = 0;  // 累计角度
+static uint32_t cnt = 0;
+static uint32_t last_t = 0;
+uint32_t now_t = (uint32_t)Timer_count * ENCODER_SAMPLE_MS;
+float dt = (now_t - last_t) / 1000.0f;  // 如果你的timer是1ms精度
+last_t = now_t;
 
-    Motor_Enable();
-    Motor_SetSpeed(20, 20);
-    
+icm42688_real_data_t av, gv;
+ICM42688_ReadMotion6(&av, &gv);  // 直接读原始dps
+
+printf("gx=%.2f gy=%.2f gz=%.2f  |  yaw_sum=%.1f\r\n",
+       gv.x, gv.y, gv.z, yaw_sum);
+
+yaw_sum += gv.z * dt;  // gv.z is already degrees per second
+cnt++;
 }
 
 void task3(void)
 {
-    static uint8_t first = 1;
-    icm42688_real_data_t acc, gyro;
-    icm42688_raw_data_t  raw_acc, raw_gyro;
-    float temp;
+    static uint8_t task3_state = 0;
 
-    static float ypr[3];
-
-    IMU_getYawPitchRoll(ypr);
-
-    printf("yaw:%f pitch:%f roll:%f\r\n",ypr[0],ypr[1],ypr[2]);
+    if(!task3_state){
 
 
-   
+    OLED_Clear();
+    OLED_Refresh();
+    task3_state = 1;
+    }
+    
+    if(task3_state)
+    {
+        
+        static uint8_t print_div = 0;//打印间隔
+        static int last_tick = 0;//上一时刻值
+        static float ypr[3];
+        float motion[7];
+        float dt;//时间
+        int now_tick;//当前时间
+        int elapsed_ticks;//时间间隔
+        static int first = 1;
+        int8_t status;
 
-    delay_ms(100);
+        if (first) {
+            last_tick = Timer_count;
+            first = 0;
+            return;
+        }
+
+        now_tick = Timer_count;
+        elapsed_ticks = now_tick - last_tick;
+        if (elapsed_ticks <= 0) return;
+        last_tick = now_tick;
+        dt = elapsed_ticks * ENCODER_SAMPLE_MS / 1000.0f;//计算时间
+        if (dt > 0.1f) dt = 0.1f;//限制时间
+
+        status = IMU_getYawPitchRoll(ypr, dt);//获取陀螺仪数据并检测是否正常
+        if (status != 0) {
+            printf("ICM42688 AHRS read failed: %d\r\n", status);
+            return;
+        }
+        IMU_TT_getgyro(motion);//获取陀螺仪数据
+
+        if (++print_div >= 40) {
+            //计算加速度
+            // float acc_pitch = atan2f(-motion[0],
+            //                         sqrtf(motion[1] * motion[1] + motion[2] * motion[2]))
+            //                 * 180.0f / PI;
+            // float acc_roll = atan2f(motion[1], motion[2]) * 180.0f / PI;
+            // float acc_norm = sqrtf(motion[0] * motion[0] + motion[1] * motion[1]
+            //                     + motion[2] * motion[2]);
+            print_div = 0;
+            printf("yaw:%f pitch:%f roll:%f\r\n",ypr[0],ypr[1],ypr[2]);
+            OLED_ShowString(0,0,"yaw:",14);
+            OLED_ShowFloat(25,0,ypr[0],3,2,14);
+            OLED_ShowString(0,10,"pitch:",14);
+            OLED_ShowFloat(25,10,ypr[1],3,2,14);
+            OLED_ShowString(0,20,"roll:",14);
+            OLED_ShowFloat(25,20,ypr[2],3,2,14);
+            OLED_Refresh();
+        }
+    }
+    
 }
 
-/*
- * 任务四：编码器验证测试
- * 功能：关闭电机，手动转动轮子，观察编码器位置变化
- *       用于验证 PPR、QEI 补偿系数、速度计算是否正确
- *
- * 串口输出格式：
- *   [序号] 左位置 增量 | 右位置 增量 | 左速度 右速度
- *
- * 验证方法：
- *   1. 手动转动输出轴（轮子）恰好一圈
- *   2. 观察编码器位置变化量
- *   3. 理论值：输出轴1圈 = 电机轴28圈 = 28*13 = 364 原始脉冲
- *      经 QEI 2X + 代码/4 补偿后，预期增量 ≈ 182
- */
+
 void task4(void)
 {
     static uint8_t  state = 0;

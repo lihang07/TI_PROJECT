@@ -120,7 +120,7 @@ void IMU_init(void) {
  * 说明: 当陀螺仪数据方差很小时,认为传感器静止
  *       此时可以准确估计陀螺仪零偏
  * ============================================ */
-static double Gf[3][300], Gt[3], sqGt[3];
+static double Gf[3][500], Gt[3], sqGt[3];
 static int Gif=0, Gc=0;
 static float go[3]={0};
 static int Cc=0;
@@ -158,17 +158,20 @@ static void calGyroVar(float d[], int len, float sq[], float avg[]) {
  *   3. 静止检测并更新零偏估计
  *   4. 注意: 本项目未使用磁力计,所以mx,my,mz为0
  */
-static void getVals(float *v) {
+
+static int8_t getVals(float *v) {
     icm42688_real_data_t av,gv;
     float sqr[3],avgr[3];
 
     /* 读取6轴传感器数据 */
-    ICM42688_ReadMotion6(&av,&gv);
+    int8_t status = ICM42688_ReadMotion6(&av,&gv);//读取数据
+    if (status != 0) return status;
 
     /* 缓存数据到TTangles_gyro数组 */
     TTangles_gyro[0]=av.x; TTangles_gyro[1]=av.y; TTangles_gyro[2]=av.z;
     TTangles_gyro[3]=gv.x; TTangles_gyro[4]=gv.y; TTangles_gyro[5]=gv.z;
     TTangles_gyro[6]=0;
+
 
     /* 计算陀螺仪方差,检测静止状态 */
     calGyroVar(&TTangles_gyro[3],100,sqr,avgr);
@@ -184,14 +187,13 @@ static void getVals(float *v) {
     v[0]=av.x; v[1]=av.y; v[2]=av.z;
     /* 输出陀螺仪零偏补偿后的数据 */
     v[3]=gv.x-go[0]; v[4]=gv.y-go[1]; v[5]=gv.z-go[2];
+    return 0;
 }
 
 /* ============================================
  * AHRS算法常量
  * ============================================ */
 #define AKi  0.001f    /* 积分系数(Accel Ki) - 积分项的增益 */
-#define AHT  0.01f     /* 积分时间步长(Half Time) - 0.01秒=10ms
-                        * 注意: 这里用半步长,因为后续使用的是半积分公式 */
 
 /* AHRSupdate: AHRS姿态更新核心算法
  * 参数:
@@ -218,8 +220,10 @@ static void getVals(float *v) {
  *   PI补偿:
  *   gx_corrected = gx + Kp*ex + Ki*∫ex*dt
  */
-static void AHRSupdate(float gx,float gy,float gz,float ax,float ay,float az,float mx,float my,float mz) {
+static void AHRSupdate(float gx,float gy,float gz,float ax,float ay,float az,
+                       float mx,float my,float mz,float dt_seconds) {
     float n,vx,vy,vz,ex,ey,ez,tq0,tq1,tq2,tq3;
+    float halfDt = 0.5f * dt_seconds;
 
     /* 预计算四元数分量乘积(用于后续计算) */
     float q0q0=q0*q0,q0q1=q0*q1,q0q2=q0*q2,q0q3=q0*q3;
@@ -232,7 +236,9 @@ static void AHRSupdate(float gx,float gy,float gz,float ax,float ay,float az,flo
     n=invSqrt1(ax*ax+ay*ay+az*az); ax*=n; ay*=n; az*=n;
 
     /* 规范化磁力计向量(本项目未使用,始终为0) */
-    n=invSqrt1(mx*mx+my*my+mz*mz); mx*=n; my*=n; mz*=n;
+    if ((mx*mx+my*my+mz*mz) > 0.0f) {
+        n=invSqrt1(mx*mx+my*my+mz*mz); mx*=n; my*=n; mz*=n;
+    }
 
     /* 从四元数计算重力向量在载体坐标系的投影(北向)
      * 地理坐标系中,重力方向为[0, 0, 1]
@@ -265,8 +271,8 @@ static void AHRSupdate(float gx,float gy,float gz,float ax,float ay,float az,flo
      * 含义: 当前误差的直接补偿,提供即时响应
      *
      * 总补偿: gx += Kp*ex + exInt */
-    if(ex!=0&&ey!=0&&ez!=0){
-        exInt+=ex*AKi*AHT; eyInt+=ey*AKi*AHT; ezInt+=ez*AKi*AHT;
+    if(ex!=0||ey!=0||ez!=0){
+        exInt+=ex*AKi*dt_seconds; eyInt+=ey*AKi*dt_seconds; ezInt+=ez*AKi*dt_seconds;
         gx+=Kp*ex+exInt; gy+=Kp*ey+eyInt; gz+=Kp*ez+ezInt;
     }
 
@@ -279,10 +285,10 @@ static void AHRSupdate(float gx,float gy,float gz,float ax,float ay,float az,flo
      * tq1 = q1 + (q0*gx + q2*gz - q3*gy) * AHT
      * tq2 = q2 + (q0*gy - q1*gz + q3*gx) * AHT
      * tq3 = q3 + (q0*gz + q1*gy - q2*gx) * AHT */
-    tq0=q0+(-q1*gx-q2*gy-q3*gz)*AHT;
-    tq1=q1+(q0*gx+q2*gz-q3*gy)*AHT;
-    tq2=q2+(q0*gy-q1*gz+q3*gx)*AHT;
-    tq3=q3+(q0*gz+q1*gy-q2*gx)*AHT;
+    tq0=q0+(-q1*gx-q2*gy-q3*gz)*halfDt;
+    tq1=q1+(q0*gx+q2*gz-q3*gy)*halfDt;
+    tq2=q2+(q0*gy-q1*gz+q3*gx)*halfDt;
+    tq3=q3+(q0*gz+q1*gy-q2*gx)*halfDt;
 
     /* 规范化四元数(确保四元数为单位长度)
      * 原因: 积分过程中可能出现数值误差累积
@@ -307,12 +313,14 @@ static float mqv[9];
  *   3. 调用AHRS更新算法
  *   4. 返回更新后的四元数
  */
-static void getQ(float *q) {
-    getVals(mqv);
+static int8_t getQ(float *q, float dt_seconds) {
+    int8_t status = getVals(mqv);
+    if (status != 0) return status;
     /* 将dps转换为rad/s: 角度制×π/180 */
     AHRSupdate(mqv[3]*3.1415926535f/180,mqv[4]*3.1415926535f/180,mqv[5]*3.1415926535f/180,
-               mqv[0],mqv[1],mqv[2],mqv[6],mqv[7],mqv[8]);
+               mqv[0],mqv[1],mqv[2],mqv[6],mqv[7],mqv[8],dt_seconds);
     q[0]=q0; q[1]=q1; q[2]=q2; q[3]=q3;
+    return 0;
 }
 
 /* IMU_getYawPitchRoll: 获取姿态角(欧拉角)
@@ -331,13 +339,17 @@ static void getQ(float *q) {
  * 注意: 不同坐标系定义会导致公式略有差异
  *       本代码使用了特定的坐标转换约定
  */
-void IMU_getYawPitchRoll(float *a) {
-    float q[4]; getQ(q);
+int8_t IMU_getYawPitchRoll(float *a, float dt_seconds) {
+    float q[4];
+    int8_t status;
+    if (a == 0 || dt_seconds <= 0.0f) return -3;
+    status = getQ(q, dt_seconds);
+    if (status != 0) return status;
 
     /* 计算Yaw (偏航角) - 绕Z轴旋转
      * atan2(2*(q1*q2+q0*q3), -2*q2²-2*q3²+1)
      * 转换为度: 弧度值 × 180/π */
-    a[0]=-atan2f(2*q[1]*q[2]+2*q[0]*q[3],-2*q[2]*q[2]-2*q[3]*q[3]+1)*180/3.1415926535f;
+    a[0]=(-atan2f(2*q[1]*q[2]+2*q[0]*q[3],-2*q[2]*q[2]-2*q[3]*q[3]+1)*180/3.1415926535f)-1.5f;
 
     /* 计算Pitch (俯仰角) - 绕X轴旋转
      * asin(-2*q1*q3+2*q0*q2)
@@ -347,6 +359,7 @@ void IMU_getYawPitchRoll(float *a) {
     /* 计算Roll (翻滚角) - 绕Y轴旋转
      * atan2(2*(q2*q3+q0*q1), -2*q1²-2*q2²+1) */
     a[2]=atan2f(2*q[2]*q[3]+2*q[0]*q[1],-2*q[1]*q[1]-2*q[2]*q[2]+1)*180/3.1415926535f;
+    return 0;
 }
 
 /* IMU_TT_getgyro: 获取原始陀螺仪数据(调试用)

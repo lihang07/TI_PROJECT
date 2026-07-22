@@ -40,11 +40,14 @@ static void delayMs(uint32_t ms)
  * 参数: bank - 要选择的bank号(0-4)
  * 说明: ICM42688有多个寄存器bank,需要通过BANK_SEL寄存器切换
  *       为了提高效率,只在切换到不同bank时才执行写操作 */
-static void selectBank(uint8_t bank) {
+static int8_t selectBank(uint8_t bank) {
     if (bank != gCurrentBank) {
-        (void)I2C_WriteReg(ICM42688_I2C_ADDR, ICM42688_REG_BANK_SEL, &bank, 1);
+        int8_t status = I2C_WriteReg(ICM42688_I2C_ADDR,
+                                     ICM42688_REG_BANK_SEL, &bank, 1);
+        if (status != 0) return status;
         gCurrentBank = bank;
     }
+    return 0;
 }
 
 /* ICM42688_ReadReg: 读取指定bank的寄存器
@@ -55,8 +58,8 @@ static void selectBank(uint8_t bank) {
  * 实现: 先切换bank,然后通过I2C读取单个字节 */
 uint8_t ICM42688_ReadReg(uint8_t reg, uint8_t bank) {
     uint8_t v=0;
-    selectBank(bank);
-    I2C_ReadReg(ICM42688_I2C_ADDR, reg, &v, 1);
+    if (selectBank(bank) != 0) return 0;
+    (void)I2C_ReadReg(ICM42688_I2C_ADDR, reg, &v, 1);
     return v;
 }
 
@@ -66,7 +69,7 @@ uint8_t ICM42688_ReadReg(uint8_t reg, uint8_t bank) {
  *   bank - 寄存器bank号
  *   val  - 要写入的值(8位) */
 void ICM42688_WriteReg(uint8_t reg, uint8_t bank, uint8_t val) {
-    selectBank(bank);
+    if (selectBank(bank) != 0) return;
     (void)I2C_WriteReg(ICM42688_I2C_ADDR, reg, &val, 1);
 }
 
@@ -77,10 +80,10 @@ void ICM42688_WriteReg(uint8_t reg, uint8_t bank, uint8_t val) {
  *       量程越小,分辨率越高,灵敏度越大 */
 static float accelSens(uint8_t fs) {
     switch(fs) {
-    case ICM42688_ACCEL_FS_2G:  return 2000.0f/32768.0f;  /* ±2g:  2000 LSB/g  (实际16384/32768=0.061mg/LSB) */
-    case ICM42688_ACCEL_FS_4G:  return 4000.0f/32768.0f;  /* ±4g:  4000 LSB/g  (实际8192/32768=0.122mg/LSB) */
-    case ICM42688_ACCEL_FS_8G:  return 8000.0f/32768.0f;  /* ±8g:  8000 LSB/g  (实际4096/32768=0.244mg/LSB) */
-    default:                    return 16000.0f/32768.0f;  /* ±16g: 16000 LSB/g (实际2048/32768=0.488mg/LSB) */
+    case ICM42688_ACCEL_FS_2G:  return 2*(2.0f/32768.0f);
+    case ICM42688_ACCEL_FS_4G:  return 2*(4.0f/32768.0f);
+    case ICM42688_ACCEL_FS_8G:  return 2*(8.0f/32768.0f);
+    default:                    return 2*(16.0f/32768.0f);
     }
 }
 
@@ -91,14 +94,14 @@ static float accelSens(uint8_t fs) {
  *       量程越小,分辨率越高,灵敏度越大 */
 static float gyroSens(uint8_t fs) {
     switch(fs) {
-    case ICM42688_GYRO_FS_15_125DPS: return 15.125f/32768.0f;   /* ±15.125dps  */
-    case ICM42688_GYRO_FS_31_25DPS:  return 31.25f/32768.0f;    /* ±31.25dps   */
-    case ICM42688_GYRO_FS_62_5DPS:   return 62.5f/32768.0f;     /* ±62.5dps    */
-    case ICM42688_GYRO_FS_125DPS:    return 125.0f/32768.0f;     /* ±125dps     */
-    case ICM42688_GYRO_FS_250DPS:    return 250.0f/32768.0f;     /* ±250dps     */
-    case ICM42688_GYRO_FS_500DPS:    return 500.0f/32768.0f;     /* ±500dps     */
-    case ICM42688_GYRO_FS_1000DPS:   return 1000.0f/32768.0f;    /* ±1000dps    */
-    default:                         return 2000.0f/32768.0f;   /* ±2000dps    */
+    case ICM42688_GYRO_FS_15_125DPS: return 2*(15.125f/32768.0f);   /* ±15.125dps  */
+    case ICM42688_GYRO_FS_31_25DPS:  return 2*(31.25f/32768.0f);    /* ±31.25dps   */
+    case ICM42688_GYRO_FS_62_5DPS:   return 2*(62.5f/32768.0f);     /* ±62.5dps    */
+    case ICM42688_GYRO_FS_125DPS:    return 2*(125.0f/32768.0f);     /* ±125dps     */
+    case ICM42688_GYRO_FS_250DPS:    return 2*(250.0f/32768.0f);     /* ±250dps     */
+    case ICM42688_GYRO_FS_500DPS:    return 2*(500.0f/32768.0f);     /* ±500dps     */
+    case ICM42688_GYRO_FS_1000DPS:   return 2*(1000.0f/32768.0f);    /* ±1000dps    */
+    default:                         return 2*(2000.0f/32768.0f);   /* ±2000dps    */
     }
 }
 
@@ -175,9 +178,10 @@ int8_t ICM42688_Init(void) {
  *   len - 要读取的字节数
  * 说明: 突发读取可以在一个I2C事务中连续读取多个寄存器
  *       常用于一次性获取一组相关数据(如传感器6轴数据) */
-static void burstRead(uint8_t reg, uint8_t *buf, uint8_t len) {
-    selectBank(ICM42688_BANK_0);
-    (void)I2C_ReadReg(ICM42688_I2C_ADDR, reg, buf, len);
+static int8_t burstRead(uint8_t reg, uint8_t *buf, uint8_t len) {
+    int8_t status = selectBank(ICM42688_BANK_0);
+    if (status != 0) return status;
+    return I2C_ReadReg(ICM42688_I2C_ADDR, reg, buf, len);
 }
 
 /* parseTrip: 解析三轴数据(6字节->3个int16)
@@ -197,14 +201,22 @@ static void parseTrip(const uint8_t *b, icm42688_raw_data_t *o) {
  * 返回值: 0=成功
  * 使用burst read从ACCEL_DATA_X1开始连续读取6字节 */
 int8_t ICM42688_ReadAccelRaw(icm42688_raw_data_t *d) {
-    uint8_t b[6]; burstRead(ICM42688_REG_ACCEL_DATA_X1,b,6); parseTrip(b,d); return 0;
+    uint8_t b[6];
+    int8_t status = burstRead(ICM42688_REG_ACCEL_DATA_X1,b,6);
+    if (status != 0) return status;
+    parseTrip(b,d);
+    return 0;
 }
 
 /* ICM42688_ReadGyroRaw: 读取陀螺仪原始数据
  * 参数: d - 存储陀螺仪原始数据
  * 返回值: 0=成功 */
 int8_t ICM42688_ReadGyroRaw(icm42688_raw_data_t *d) {
-    uint8_t b[6]; burstRead(ICM42688_REG_GYRO_DATA_X1,b,6); parseTrip(b,d); return 0;
+    uint8_t b[6];
+    int8_t status = burstRead(ICM42688_REG_GYRO_DATA_X1,b,6);
+    if (status != 0) return status;
+    parseTrip(b,d);
+    return 0;
 }
 
 /* ICM42688_ReadTemperature: 读取温度传感器
@@ -215,7 +227,8 @@ int8_t ICM42688_ReadGyroRaw(icm42688_raw_data_t *d) {
  *       温度转换公式: T(°C) = Raw / 132.48 + 25 */
 int8_t ICM42688_ReadTemperature(float *t) {
     uint8_t b[2]; int16_t r;
-    burstRead(ICM42688_REG_TEMP_DATA1,b,2);
+    int8_t status = burstRead(ICM42688_REG_TEMP_DATA1,b,2);
+    if (status != 0) return status;
     r=(int16_t)(((uint16_t)b[0]<<8)|b[1]);
     *t=(float)r/132.48f+25.0f;
     return 0;
@@ -261,7 +274,8 @@ void ICM42688_GyroToFloat(const icm42688_raw_data_t *raw,
 int8_t ICM42688_ReadMotion6(icm42688_real_data_t *acc,
                              icm42688_real_data_t *gyro) {
     uint8_t b[12];
-    burstRead(ICM42688_REG_ACCEL_DATA_X1,b,12);
+    int8_t status = burstRead(ICM42688_REG_ACCEL_DATA_X1,b,12);
+    if (status != 0) return status;
     icm42688_raw_data_t ar,gr;
     /* 解析加速度数据 */
     ar.x=(int16_t)(((uint16_t)b[0]<<8)|b[1]);

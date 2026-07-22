@@ -30,7 +30,7 @@ void IMU_init(void);
  * 参数: ypr - 输出数组[yaw, pitch, roll] 单位:度(°)
  * 说明: 基于AHRS算法融合加速度计和陀螺仪数据
  *       使用四元数表示姿态,通过欧拉角转换得到最终角度 */
-void IMU_getYawPitchRoll(float *ypr);
+int8_t IMU_getYawPitchRoll(float *ypr, float dt_seconds);
 
 /* IMU_TT_getgyro: 获取原始陀螺仪数据
  * 参数: zsjganda - 输出数组[ax,ay,az,gx,gy,gz,0]
