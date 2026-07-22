@@ -91,7 +91,7 @@ int main(void)
     Cartask state = status_stop;
 
     OLED_Init();
-    //IMU_init();
+    IMU_init();
     printf("IMU init done. Press KEY4 for ICM42688 test.\r\n");
     /* 初始化编码器 */
     Motor_Encoder_Init();
@@ -125,8 +125,6 @@ int main(void)
                 stop();
                 break;
             case(status_task1):
-            DL_GPIO_togglePins(LED_PORT,LED_PIN22_PIN);
-            delay_ms(100);
                 task1();
                 break;
             case(status_task2):
@@ -343,36 +341,14 @@ void task3(void)
     icm42688_raw_data_t  raw_acc, raw_gyro;
     float temp;
 
-    if (first) {
-        first = 0;
-        printf("\r\n===== ICM42688 Sensor Test =====\r\n");
-        printf("  I2C Addr : 0x69 (PA10=SDA, PA11=SCL)\r\n");
-        printf("  Accel FS : +/-4g, ODR=100Hz\r\n");
-        printf("  Gyro  FS : +/-1000dps, ODR=100Hz\r\n");
-        printf("================================\r\n\r\n");
-    }
+    static float ypr[3];
+
+    IMU_getYawPitchRoll(ypr);
+
+    printf("yaw:%f pitch:%f roll:%f\r\n",ypr[0],ypr[1],ypr[2]);
 
 
-    ICM42688_ReadTemperature(&temp);
-    printf("Temp : %.2f C\r\n", temp);
-
-
-    ICM42688_ReadAccelRaw(&raw_acc);
-    printf("Acc  Raw : X=%6d  Y=%6d  Z=%6d\r\n",
-           raw_acc.x, raw_acc.y, raw_acc.z);
-
-
-    ICM42688_ReadGyroRaw(&raw_gyro);
-    printf("Gyro Raw : X=%6d  Y=%6d  Z=%6d\r\n",
-           raw_gyro.x, raw_gyro.y, raw_gyro.z);
-
-
-    ICM42688_ReadMotion6(&acc, &gyro);
-    printf("Acc  : X=%+7.3fg  Y=%+7.3fg  Z=%+7.3fg\r\n",
-           acc.x, acc.y, acc.z);
-    printf("Gyro : X=%+8.2f  Y=%+8.2f  Z=%+8.2f dps\r\n",
-           gyro.x, gyro.y, gyro.z);
-    printf("------------------------\r\n");
+   
 
     delay_ms(1000);
 }
