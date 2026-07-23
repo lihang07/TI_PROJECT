@@ -78,7 +78,17 @@ static Motor_PID_t g_speed_pid;         /* 速度闭环PID结构体 */
 static float      g_speed_target = 0;   /* 目标速度(pulse/s) */
 static uint8_t    g_speed_loop_active = 0; /* 速度闭环激活标志 */
 static uint8_t    g_speed_print_cnt = 0;   /* 调试打印计数器，降频用 */
-static float TIMA0_count = 0;
+static volatile uint32_t TIMA0_count = 0;
+
+//==========  IMU全局数据区（主循环读取，各任务共享） ==========//
+static float g_imu_ypr[3] = {0};        /* 姿态角 [yaw, pitch, roll]，单位：度 */
+static float g_imu_gyro[3] = {0};       /* 陀螺仪角速度 [gx, gy, gz]，单位：度/秒 */
+static uint8_t g_imu_data_valid = 0;    /* 数据有效标志：1=有效，0=无效 */
+static int8_t g_imu_status = 0;         /* IMU状态：0=正常，-2=校准中，其他=错误 */
+static volatile uint8_t g_imu_ready = 0; /* IMU更新标志：1=有新数据待读取，由定时器中断置位 */
+static uint32_t g_imu_last_tick = 0;     /* 上次IMU读取时的TIMA0_count，用于计算真实dt */
+static float g_imu_dt = 0.01f;           /* 最近一次IMU读取的真实dt（秒），各任务可直接使用 */
+static volatile uint32_t g_imu_sample_seq = 0;
 
 
 
@@ -86,7 +96,7 @@ static float TIMA0_count = 0;
 int main(void)
 {
     SYSCFG_DL_init();
-   
+    
 
     //初始状态
     Cartask state = status_stop;
@@ -114,6 +124,35 @@ int main(void)
     uint8_t key_status = 0;
    
     while (1) {
+        /* ==================== 主循环IMU数据采集 ==================== */
+        /* 基于TIMG7 10ms定时器中断，每10ms触发一次IMU读取 */
+        if (g_imu_ready) {
+            g_imu_ready = 0;  /* 清除标志（不清零Timer_count，不影响其他任务） */
+
+            /* 计算真实dt：基于TIMA0_count时间戳差值 */
+            uint32_t now_tick = TIMA0_count;
+            uint32_t elapsed = now_tick - g_imu_last_tick;
+            float dt = (float)elapsed * (33.0f / 32768.0f);
+
+            /* dt合理性检查：0.005s~0.1s之间（约5ms~100ms） */
+            if (dt < 0.005f || dt > 0.1f) {
+                dt = 0.01f;  /* 异常时使用默认值 */
+            }
+
+            g_imu_status = IMU_getYawPitchRoll(g_imu_ypr, dt);
+            if (g_imu_status == 0) {
+                g_imu_data_valid = 1;
+                /* 获取陀螺仪原始角速度数据 */
+                IMU_GetCorrectedGyro(g_imu_gyro);
+                g_imu_sample_seq++;
+            } else {
+                g_imu_data_valid = 0;
+            }
+
+            g_imu_dt = dt;                 /* 保存真实dt供各任务使用 */
+            g_imu_last_tick = now_tick;  /* 更新本次时间戳 */
+        }
+       
       //  printf("right encoder: %d\r\n",Motor_GetRightEncoderPosition());
       //  printf("left encoder : %d\r\n",Motor_GetLeftEncoderPosition());
       //  printf("GB2 :%d\r\n",DL_GPIO_readPins(Motor_GB2_PORT,Motor_GB2_PIN));
@@ -125,7 +164,6 @@ int main(void)
         else if (key_status == 3) state = status_task3;
         else if (key_status == 4) state = status_task4;
        
-       printf("%d\r\n",key_status);
         switch(state)
         {
             case(status_stop):
@@ -188,14 +226,15 @@ int main(void)
     }
 }
 
-/* 简介: TIMER_count中断处理函数（50ms定时器）
- * 功能: 每50ms自动调用Motor_Encoder_UpdateSpeed()更新编码器速度和位置
+/* 简介: TIMER_count中断处理函数（5ms定时器）
+ * 功能: 每5ms自动调用Motor_Encoder_UpdateSpeed()更新编码器速度和位置
  * 说明: sysconfig中TIMER_count已配置为5ms周期、自动启动 */
 void TIMG7_IRQHandler(void)
 {
     DL_TimerG_clearInterruptStatus(TIMER_count_INST, DL_TIMERG_INTERRUPT_LOAD_EVENT);
     Motor_Encoder_UpdateSpeed();
     Timer_count++;
+    g_imu_ready = 1;  /* 置位IMU更新标志，由主循环读取后清除 */
 }
 
 float IR_PID_Control(float err)
@@ -298,9 +337,8 @@ void task1(void)
                 return;
             }
 
-            static float ypr[3];
-            (void)IMU_getYawPitchRoll(ypr, ENCODER_SAMPLE_MS / 1000.0f);
-            printf("yaw:%f pitch:%f roll:%f\r\n",ypr[0],ypr[1],ypr[2]);
+            printf("yaw:%f pitch:%f roll:%f\r\n",
+                   g_imu_ypr[0], g_imu_ypr[1], g_imu_ypr[2]);
             
             /* ③ 梯形速度规划：根据当前距离计算目标速度 */
             g_speed_target = plan_speed(current_dist, target_dist);
@@ -339,150 +377,105 @@ void task1(void)
 void task2(void)
 {
 // 在你的循环里加这个
-static float yaw_sum = 0;  // 累计角度
-static int cnt = 0;
-static uint32_t last_t = 0;
-uint32_t now_t = (uint32_t)Timer_count * ENCODER_SAMPLE_MS;
-float dt = (now_t - last_t) / 1000.0f;  // 如果你的timer是1ms精度
-last_t = now_t;
+    static float yaw_sum = 0;  // 累计角度
+    static float ypr[3];
+    if (!g_imu_data_valid) return;
+    ypr[0] = g_imu_ypr[0];
+    ypr[1] = g_imu_ypr[1];
+    ypr[2] = g_imu_ypr[2];
+    icm42688_real_data_t gv;
+    gv.x = g_imu_gyro[0];
+    gv.y = g_imu_gyro[1];
+    gv.z = g_imu_gyro[2];
 
-icm42688_real_data_t av, gv;
-ICM42688_ReadMotion6(&av, &gv);  // 直接读原始dps
+    printf("gx=%.2f gy=%.2f gz=%.2f  |  yaw_sum=%.1f\r\n",
+        ypr[0],ypr[1],ypr[2], yaw_sum);
 
-printf("gx=%.2f gy=%.2f gz=%.2f  |  yaw_sum=%.1f\r\n",
-       gv.x, gv.y, gv.z, yaw_sum);
-
-yaw_sum += gv.z * dt;  // gv.z is already degrees per second
-cnt++;
+    yaw_sum = ypr[0];
+    printf("Tima0:%d\r\n",Timer_count);
 }
+
+
 
 void task3(void)
 {
     static uint8_t task3_state = 0;
-    
 
-    if(task3_state==0){
-    OLED_Clear();
-    OLED_Refresh();
-    task3_state = 1;
-    printf("ok");
-   
+    /* 初始化：清除OLED */
+    if (task3_state == 0) {
+        OLED_Clear();
+        OLED_Refresh();
+        task3_state = 1;
+        printf("task3 start, GYRO_CONFIG0=0x%02X (expected 0x28)\r\n",
+               ICM42688_ReadReg(ICM42688_REG_GYRO_CONFIG0, ICM42688_BANK_0));
+        return;
     }
-    
-    else
-    {
-        
-        static uint8_t print_div = 0;
-        static int32_t last_tick = 0;
-        static float ypr[3];
-        float motion[7];
-        float dt;
-        int32_t now_tick;
-        int8_t status;
-        static uint8_t first = 0;
 
-        if (first == 0) {
-            last_tick = TIMA0_count;//获取系统时间
-            printf("%d\r\n",last_tick);
-            printf("ok\r\n");
-            first = 1;
-            return;
-        }
-      
-        now_tick = TIMA0_count;
-        int32_t elapsed_ms = (int32_t)(now_tick*1000 - last_tick*1000);
-        printf("%d\r\n",elapsed_ms);
-        //if (elapsed_ms <= 0) {printf("%d\r\n",elapsed_ms);return;}
-        last_tick = now_tick;
-        dt = elapsed_ms / 1000000.0f;
-
-        status = IMU_getYawPitchRoll(ypr, 0.01f);
-        if(status == -2)
-        {
-            //校准中
-            return;
-        }
-        if (status != 0) {
-            printf("ICM42688 AHRS read failed: %d\r\n", status);
-            return;
-        }
-        IMU_TT_getgyro(motion);
-        printf("ok");
-        if (++print_div >= 40) {
-            print_div = 0;
-            printf("yaw:%f pitch:%f roll:%f\r\n", ypr[0], ypr[1], ypr[2]);
-            OLED_ShowString(0, 0, (uint8_t*)"yaw:", 16);
-            OLED_ShowFloat(25, 0, ypr[0], 3, 2, 16);
-            OLED_ShowString(0, 18, (u8 *)"pitch:", 16);
-            OLED_ShowFloat(25, 18, ypr[1], 3, 2, 16);
-            OLED_ShowString(0, 36, (u8 *)"roll:", 16);
-            OLED_ShowFloat(25, 36, ypr[2], 3, 2, 16);
-            OLED_Refresh();
-        }
+    /* 检查IMU数据是否有效 */
+    if (g_imu_data_valid == 0) {
+        return;
     }
-    return ;
+
+    /* 使用全局IMU数据（由主循环每10ms更新一次） */
+    float yaw = g_imu_ypr[0];
+    float pitch = g_imu_ypr[1];
+    float roll = g_imu_ypr[2];
+    float gz = g_imu_gyro[2];  /* z轴角速度，度/秒 */
+
+    /* 累计yaw角度（积分） */
+    static float yaw_total = 0;
+    static float gyro_total_x = 0.0f;
+    static float gyro_total_y = 0.0f;
+    static float gyro_total_z = 0.0f;
+    static uint8_t print_div = 0;
+    static uint32_t last_sample_seq = 0;
+    static float last_yaw = 0.0f;
+    static uint8_t yaw_initialized = 0;
+    if (g_imu_sample_seq == last_sample_seq) {
+        return;
+    }
+    last_sample_seq = g_imu_sample_seq;
+
+    gyro_total_x += g_imu_gyro[0] * g_imu_dt;
+    gyro_total_y += g_imu_gyro[1] * g_imu_dt;
+    gyro_total_z += g_imu_gyro[2] * g_imu_dt;
+
+    if (!yaw_initialized) {
+        last_yaw = yaw;
+        yaw_initialized = 1;
+    } else {
+        float yaw_delta = yaw - last_yaw;
+        if (yaw_delta > 180.0f) yaw_delta -= 360.0f;
+        if (yaw_delta < -180.0f) yaw_delta += 360.0f;
+        yaw_total += yaw_delta;
+        last_yaw = yaw;
+    }
+
+    /* 每40次（200ms）打印和更新OLED一次 */
+    if (++print_div >= 20) {
+        icm42688_raw_data_t raw_gyro;
+        print_div = 0;
+        (void)ICM42688_ReadGyroRaw(&raw_gyro);
+        printf("dt:%.4f YPR:%.2f %.2f %.2f | gyro:%.2f %.2f %.2f rawZ:%d | sum:%.2f %.2f %.2f\r\n",
+               g_imu_dt, yaw, pitch, roll,
+               g_imu_gyro[0], g_imu_gyro[1], g_imu_gyro[2],
+               raw_gyro.z,
+               gyro_total_x, gyro_total_y, gyro_total_z);
+        OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
+        OLED_ShowFloat(25, 0, yaw, 3, 2, 16);
+        OLED_ShowString(0, 18, (uint8_t *)"pitch:", 16);
+        OLED_ShowFloat(48, 18, pitch, 3, 2, 16);
+        OLED_ShowString(0, 36, (uint8_t *)"roll:", 16);
+        OLED_ShowFloat(25, 36, roll, 3, 2, 16);
+        OLED_Refresh();
+    }
 }
 
 
 void task4(void)
 {
-    static uint8_t  state = 0;
-    static int32_t  last_left_pos  = 0;
-    static int32_t  last_right_pos = 0;
-    static uint32_t print_count    = 0;
-
-    if (state == 0) {
-        Motor_Disable();                    /* 关闭电机，手动转动 */
-        Motor_ResetLeftEncoder();           /* 左编码器归零 */
-        Motor_ResetRightEncoder();          /* 右编码器归零 */
-        last_left_pos  = 0;
-        last_right_pos = 0;
-        print_count    = 0;
-
-        printf("\r\n========================================\r\n");
-        printf("      Encoder Verification Test\r\n");
-        printf("========================================\r\n");
-        printf("  PPR           = %d\r\n", ENCODER_PPR);
-        printf("  Sample period = %d ms\r\n", ENCODER_SAMPLE_MS);
-        printf("  Gear ratio    = 1:28\r\n");
-        printf("  Encoder on motor shaft\r\n");
-        printf("----------------------------------------\r\n");
-        printf("  Expected (output shaft 1 rev):\r\n");
-        printf("    Raw QEI 4X counts = %d\r\n", ENCODER_PPR * 28 * 4);
-        printf("    After /4 comp     = %d\r\n", ENCODER_PPR * 28);
-        printf("    (Left = Right)\r\n");
-        printf("----------------------------------------\r\n");
-        printf("  Motor DISABLED.\r\n");
-        printf("  Rotate wheel by hand to observe.\r\n");
-        printf("  Press key 0 to exit.\r\n");
-        printf("========================================\r\n\r\n");
-        state = 1;
-    }
-
-    if (state == 1) {
-        /* 每200ms打印一次编码器数据 */
-        if (Timer_count >= 40) {
-            Timer_count = 0;
-
-            int32_t left_pos   = Motor_GetLeftEncoderPosition();
-            int32_t right_pos  = Motor_GetRightEncoderPosition();
-            int32_t left_speed = Motor_GetLeftEncoderSpeed();
-            int32_t right_speed= Motor_GetRightEncoderSpeed();
-
-            int32_t left_delta  = left_pos  - last_left_pos;
-            int32_t right_delta = right_pos - last_right_pos;
-
-            printf("[%3u] L:%6d (+%4d) | R:%6d (+%4d) | spd L:%4d R:%4d\r\n",
-                   print_count,
-                   left_pos,  left_delta,
-                   right_pos, right_delta,
-                   left_speed, right_speed);
-
-            last_left_pos  = left_pos;
-            last_right_pos = right_pos;
-            print_count++;
-        }
-    }
+    printf("TimA0:%d\r\n",TIMA0_count);
+    delay_ms(100);
 }
 
 
@@ -491,5 +484,6 @@ void TIMA0_IRQHandler(void)
     DL_TimerA_clearInterruptStatus(TIMER_TICK_INST, DL_TIMERA_INTERRUPT_LOAD_EVENT);
     
     TIMA0_count++;
+
 
 }

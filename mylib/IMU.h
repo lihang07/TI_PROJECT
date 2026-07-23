@@ -37,6 +37,9 @@ int8_t IMU_getYawPitchRoll(float *ypr, float dt_seconds);
  * 说明: 直接获取传感器原始数据,用于调试或外部滤波 */
 void IMU_TT_getgyro(float *zsjganda);
 
+/* Return the most recent gyro sample after stationary bias compensation. */
+void IMU_GetCorrectedGyro(float *gyro);
+
 /* MPU6050_InitAng_Offset: 传感器零偏初始化(兼容MPU6050接口)
  * 说明: 本项目中未使用,仅保持接口兼容性 */
 void MPU6050_InitAng_Offset(void);

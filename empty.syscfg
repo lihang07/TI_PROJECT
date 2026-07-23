@@ -228,7 +228,6 @@ TIMER3.peripheral.$assign = "TIMG7";
 
 TIMER4.$name                  = "TIMER_TICK";
 TIMER4.timerClkSrc            = "LFCLK";
-TIMER4.timerClkPrescale       = 33;
 TIMER4.timerMode              = "PERIODIC_UP";
 TIMER4.timerStartTimer        = true;
 TIMER4.timerPeriod            = "1ms";

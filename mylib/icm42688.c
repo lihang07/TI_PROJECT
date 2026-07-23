@@ -80,10 +80,10 @@ void ICM42688_WriteReg(uint8_t reg, uint8_t bank, uint8_t val) {
  *       量程越小,分辨率越高,灵敏度越大 */
 static float accelSens(uint8_t fs) {
     switch(fs) {
-    case ICM42688_ACCEL_FS_2G:  return 2*(2.0f/32768.0f);
-    case ICM42688_ACCEL_FS_4G:  return 2*(4.0f/32768.0f);
-    case ICM42688_ACCEL_FS_8G:  return 2*(8.0f/32768.0f);
-    default:                    return 2*(16.0f/32768.0f);
+    case ICM42688_ACCEL_FS_2G:  return 2.0f / 32768.0f;
+    case ICM42688_ACCEL_FS_4G:  return 4.0f / 32768.0f;
+    case ICM42688_ACCEL_FS_8G:  return 8.0f / 32768.0f;
+    default:                    return 16.0f / 32768.0f;
     }
 }
 
@@ -94,14 +94,14 @@ static float accelSens(uint8_t fs) {
  *       量程越小,分辨率越高,灵敏度越大 */
 static float gyroSens(uint8_t fs) {
     switch(fs) {
-    case ICM42688_GYRO_FS_15_125DPS: return 2*(15.125f/32768.0f);   /* ±15.125dps  */
-    case ICM42688_GYRO_FS_31_25DPS:  return 2*(31.25f/32768.0f);    /* ±31.25dps   */
-    case ICM42688_GYRO_FS_62_5DPS:   return 2*(62.5f/32768.0f);     /* ±62.5dps    */
-    case ICM42688_GYRO_FS_125DPS:    return 2*(125.0f/32768.0f);     /* ±125dps     */
-    case ICM42688_GYRO_FS_250DPS:    return 2*(250.0f/32768.0f);     /* ±250dps     */
-    case ICM42688_GYRO_FS_500DPS:    return 2*(500.0f/32768.0f);     /* ±500dps     */
-    case ICM42688_GYRO_FS_1000DPS:   return 2*(1000.0f/32768.0f);    /* ±1000dps    */
-    default:                         return 2*(2000.0f/32768.0f);   /* ±2000dps    */
+    case ICM42688_GYRO_FS_15_125DPS: return 15.125f / 32768.0f;
+    case ICM42688_GYRO_FS_31_25DPS:  return 31.25f / 32768.0f;
+    case ICM42688_GYRO_FS_62_5DPS:   return 62.5f / 32768.0f;
+    case ICM42688_GYRO_FS_125DPS:    return 125.0f / 32768.0f;
+    case ICM42688_GYRO_FS_250DPS:    return 250.0f / 32768.0f;
+    case ICM42688_GYRO_FS_500DPS:    return 500.0f / 32768.0f;
+    case ICM42688_GYRO_FS_1000DPS:   return 1000.0f / 32768.0f;
+    default:                          return 2000.0f / 32768.0f;
     }
 }
 

@@ -124,6 +124,15 @@ static double Gf[3][500], Gt[3], sqGt[3];
 static int Gif=0, Gc=0;
 static float go[3]={0};
 static int Cc=0;
+static uint8_t gyroBiasReady = 0;
+
+/* Board-level gyro gain calibration.  A controlled 90 degree Z-axis turn
+ * measured 25.94 degrees before this correction, so 90 / 25.94 = 3.469.
+ * Keep the sensor range conversion in icm42688.c unchanged; change only
+ * this value after repeating the mechanical reference test. */
+#define GYRO_X_SCALE_CAL  1.0f
+#define GYRO_Y_SCALE_CAL  1.0f
+#define GYRO_Z_SCALE_CAL  3.469f
 
 /* calGyroVar: 计算陀螺仪方差并检测静止状态
  * 参数:
@@ -180,13 +189,21 @@ static int8_t getVals(float *v) {
     if(sqr[0]<0.02f&&sqr[1]<0.02f&&sqr[2]<0.02f&&Cc>=99){
         go[0]=avgr[0]; go[1]=avgr[1]; go[2]=avgr[2];  /* 更新零偏估计 */
         exInt=eyInt=ezInt=0;  /* 静止时重置积分项 */
+        if (!gyroBiasReady) {
+            q0=1.0f; q1=q2=q3=0.0f;
+            gyroBiasReady = 1;
+        }
         Cc=0;
     }else if(Cc<100)Cc++;
+
+    if (!gyroBiasReady) return -2;
 
     /* 输出加速度计原始数据 */
     v[0]=av.x; v[1]=av.y; v[2]=av.z;
     /* 输出陀螺仪零偏补偿后的数据 */
-    v[3]=gv.x-go[0]; v[4]=gv.y-go[1]; v[5]=gv.z-go[2];
+    v[3]=(gv.x-go[0]) * GYRO_X_SCALE_CAL;
+    v[4]=(gv.y-go[1]) * GYRO_Y_SCALE_CAL;
+    v[5]=(gv.z-go[2]) * GYRO_Z_SCALE_CAL;
     return 0;
 }
 
@@ -349,7 +366,8 @@ int8_t IMU_getYawPitchRoll(float *a, float dt_seconds) {
     /* 计算Yaw (偏航角) - 绕Z轴旋转
      * atan2(2*(q1*q2+q0*q3), -2*q2²-2*q3²+1)
      * 转换为度: 弧度值 × 180/π */
-    a[0]=(-atan2f(2*q[1]*q[2]+2*q[0]*q[3],-2*q[2]*q[2]-2*q[3]*q[3]+1)*180/3.1415926535f)-1.5f;
+    a[0]=-atan2f(2*q[1]*q[2]+2*q[0]*q[3],
+                 -2*q[2]*q[2]-2*q[3]*q[3]+1)*180/3.1415926535f;
 
     /* 计算Pitch (俯仰角) - 绕X轴旋转
      * asin(-2*q1*q3+2*q0*q2)
@@ -370,6 +388,13 @@ void IMU_TT_getgyro(float *z) {
     z[0]=TTangles_gyro[0]; z[1]=TTangles_gyro[1]; z[2]=TTangles_gyro[2];
     z[3]=TTangles_gyro[3]; z[4]=TTangles_gyro[4]; z[5]=TTangles_gyro[5];
     z[6]=TTangles_gyro[6];
+}
+
+void IMU_GetCorrectedGyro(float *gyro) {
+    if (gyro == 0) return;
+    gyro[0] = mqv[3];
+    gyro[1] = mqv[4];
+    gyro[2] = mqv[5];
 }
 
 /* MPU6050_InitAng_Offset: 传感器零偏初始化(兼容函数)

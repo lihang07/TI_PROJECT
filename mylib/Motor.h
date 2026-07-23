@@ -70,7 +70,7 @@ void Motor_SpeedRamp(void);
 #define ENCODER_PPR           13       // 默认11线PPR，可根据实际修改
 
 // 速度采样周期（毫秒）- 影响速度更新频率
-#define ENCODER_SAMPLE_MS      5       // 5ms采样一次，速度更新20Hz
+#define ENCODER_SAMPLE_MS      10      // TIMG7 is configured for a 10 ms period
 
 // ==================== 编码器数据结构 ====================
 /* 编码器状态结构体
