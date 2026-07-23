@@ -60,7 +60,7 @@ int puts(const char *_ptr) {
 
     static volatile int Timer_count = 0;
 
-    static float base_speed = 50;
+
 
 float IR_PID_Control(float err);
 
@@ -78,7 +78,7 @@ static Motor_PID_t g_speed_pid;         /* 速度闭环PID结构体 */
 static float      g_speed_target = 0;   /* 目标速度(pulse/s) */
 static uint8_t    g_speed_loop_active = 0; /* 速度闭环激活标志 */
 static uint8_t    g_speed_print_cnt = 0;   /* 调试打印计数器，降频用 */
-
+static float TIMA0_count = 0;
 
 
 
@@ -86,12 +86,13 @@ static uint8_t    g_speed_print_cnt = 0;   /* 调试打印计数器，降频用 
 int main(void)
 {
     SYSCFG_DL_init();
+   
 
     //初始状态
     Cartask state = status_stop;
 
     OLED_Init();
-        OLED_ColorTurn(1);
+        OLED_ColorTurn(0);
     OLED_DisplayTurn(0);
     IMU_init();
     OLED_Clear();
@@ -105,8 +106,10 @@ int main(void)
      * 否则TIMG7_IRQHandler永远不会被调用 */
     NVIC_EnableIRQ(TIMER_count_INST_INT_IRQN);
     NVIC_EnableIRQ(DL_TIMERG_INTERRUPT_LOAD_EVENT);
+    NVIC_EnableIRQ(TIMER_TICK_INST_INT_IRQN);
+    
 
-    uint8_t ir[IR_NUM];
+
 
     uint8_t key_status = 0;
    
@@ -114,8 +117,7 @@ int main(void)
       //  printf("right encoder: %d\r\n",Motor_GetRightEncoderPosition());
       //  printf("left encoder : %d\r\n",Motor_GetLeftEncoderPosition());
       //  printf("GB2 :%d\r\n",DL_GPIO_readPins(Motor_GB2_PORT,Motor_GB2_PIN));
-      OLED_ShowNum(0,0,1,1,14);
-      OLED_Refresh();
+       
         key_status = key_read();
         if (key_status == 0) state = status_stop;
         else if (key_status == 1) state = status_task1;
@@ -123,6 +125,7 @@ int main(void)
         else if (key_status == 3) state = status_task3;
         else if (key_status == 4) state = status_task4;
        
+       printf("%d\r\n",key_status);
         switch(state)
         {
             case(status_stop):
@@ -136,6 +139,7 @@ int main(void)
                 task2();
                 break;
             case(status_task3):
+               
                 task3();
                 break;
             case(status_task4):
@@ -211,6 +215,7 @@ void stop(void)
     //LED快闪
     DL_GPIO_togglePins(LED_PORT,LED_PIN22_PIN);
     delay_ms(100);
+   
     // static float ypr[3];
     // IMU_getYawPitchRoll(ypr);
     // printf("yaw:%f pitch:%f roll:%f\r\n",ypr[0],ypr[1],ypr[2]);
@@ -335,7 +340,7 @@ void task2(void)
 {
 // 在你的循环里加这个
 static float yaw_sum = 0;  // 累计角度
-static uint32_t cnt = 0;
+static int cnt = 0;
 static uint32_t last_t = 0;
 uint32_t now_t = (uint32_t)Timer_count * ENCODER_SAMPLE_MS;
 float dt = (now_t - last_t) / 1000.0f;  // 如果你的timer是1ms精度
@@ -354,68 +359,68 @@ cnt++;
 void task3(void)
 {
     static uint8_t task3_state = 0;
+    
 
-    if(!task3_state){
-
-
+    if(task3_state==0){
     OLED_Clear();
     OLED_Refresh();
     task3_state = 1;
+    printf("ok");
+   
     }
     
-    if(task3_state)
+    else
     {
         
-        static uint8_t print_div = 0;//打印间隔
-        static int last_tick = 0;//上一时刻值
+        static uint8_t print_div = 0;
+        static int32_t last_tick = 0;
         static float ypr[3];
         float motion[7];
-        float dt;//时间
-        int now_tick;//当前时间
-        int elapsed_ticks;//时间间隔
-        static int first = 1;
+        float dt;
+        int32_t now_tick;
         int8_t status;
+        static uint8_t first = 0;
 
-        if (first) {
-            last_tick = Timer_count;
-            first = 0;
+        if (first == 0) {
+            last_tick = TIMA0_count;//获取系统时间
+            printf("%d\r\n",last_tick);
+            printf("ok\r\n");
+            first = 1;
             return;
         }
-
-        now_tick = Timer_count;
-        elapsed_ticks = now_tick - last_tick;
-        if (elapsed_ticks <= 0) return;
+      
+        now_tick = TIMA0_count;
+        int32_t elapsed_ms = (int32_t)(now_tick*1000 - last_tick*1000);
+        printf("%d\r\n",elapsed_ms);
+        //if (elapsed_ms <= 0) {printf("%d\r\n",elapsed_ms);return;}
         last_tick = now_tick;
-        dt = elapsed_ticks * ENCODER_SAMPLE_MS / 1000.0f;//计算时间
-        if (dt > 0.1f) dt = 0.1f;//限制时间
+        dt = elapsed_ms / 1000000.0f;
 
-        status = IMU_getYawPitchRoll(ypr, dt);//获取陀螺仪数据并检测是否正常
+        status = IMU_getYawPitchRoll(ypr, 0.01f);
+        if(status == -2)
+        {
+            //校准中
+            return;
+        }
         if (status != 0) {
             printf("ICM42688 AHRS read failed: %d\r\n", status);
             return;
         }
-        IMU_TT_getgyro(motion);//获取陀螺仪数据
-
+        IMU_TT_getgyro(motion);
+        printf("ok");
         if (++print_div >= 40) {
-            //计算加速度
-            // float acc_pitch = atan2f(-motion[0],
-            //                         sqrtf(motion[1] * motion[1] + motion[2] * motion[2]))
-            //                 * 180.0f / PI;
-            // float acc_roll = atan2f(motion[1], motion[2]) * 180.0f / PI;
-            // float acc_norm = sqrtf(motion[0] * motion[0] + motion[1] * motion[1]
-            //                     + motion[2] * motion[2]);
             print_div = 0;
-            printf("yaw:%f pitch:%f roll:%f\r\n",ypr[0],ypr[1],ypr[2]);
-            OLED_ShowString(0,0,"yaw:",14);
-            OLED_ShowFloat(25,0,ypr[0],3,2,14);
-            OLED_ShowString(0,10,"pitch:",14);
-            OLED_ShowFloat(25,10,ypr[1],3,2,14);
-            OLED_ShowString(0,20,"roll:",14);
-            OLED_ShowFloat(25,20,ypr[2],3,2,14);
+            printf("yaw:%f pitch:%f roll:%f\r\n", ypr[0], ypr[1], ypr[2]);
+            OLED_ShowString(0, 0, (uint8_t*)"yaw:", 16);
+            OLED_ShowFloat(25, 0, ypr[0], 3, 2, 16);
+            OLED_ShowString(0, 18, (u8 *)"pitch:", 16);
+            OLED_ShowFloat(25, 18, ypr[1], 3, 2, 16);
+            OLED_ShowString(0, 36, (u8 *)"roll:", 16);
+            OLED_ShowFloat(25, 36, ypr[2], 3, 2, 16);
             OLED_Refresh();
         }
     }
-    
+    return ;
 }
 
 
@@ -467,7 +472,7 @@ void task4(void)
             int32_t left_delta  = left_pos  - last_left_pos;
             int32_t right_delta = right_pos - last_right_pos;
 
-            printf("[%3lu] L:%6ld (+%4ld) | R:%6ld (+%4ld) | spd L:%4ld R:%4ld\r\n",
+            printf("[%3u] L:%6d (+%4d) | R:%6d (+%4d) | spd L:%4d R:%4d\r\n",
                    print_count,
                    left_pos,  left_delta,
                    right_pos, right_delta,
@@ -478,4 +483,13 @@ void task4(void)
             print_count++;
         }
     }
+}
+
+
+void TIMA0_IRQHandler(void)
+{
+    DL_TimerA_clearInterruptStatus(TIMER_TICK_INST, DL_TIMERA_INTERRUPT_LOAD_EVENT);
+    
+    TIMA0_count++;
+
 }

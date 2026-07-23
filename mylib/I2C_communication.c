@@ -24,6 +24,7 @@ int8_t I2C_WriteReg(uint8_t addr, uint8_t reg_addr,
     uint8_t totalLen = count + 1;
     uint8_t i;
     uint8_t status;
+    uint32_t timeout;
 
     txBuf[0] = reg_addr;
     for (i = 0; i < count; i++) {
@@ -40,11 +41,25 @@ int8_t I2C_WriteReg(uint8_t addr, uint8_t reg_addr,
     DL_I2C_startControllerTransfer(I2C_1_INST, addr,
         DL_I2C_CONTROLLER_DIRECTION_TX, totalLen);
 
+    timeout = I2C_RX_TIMEOUT;
     while (DL_I2C_getControllerStatus(I2C_1_INST)
-           & DL_I2C_CONTROLLER_STATUS_BUSY_BUS) {}
+           & DL_I2C_CONTROLLER_STATUS_BUSY_BUS) {
+        if (--timeout == 0) {
+            printf("I2C W TX timeout! a=0x%02X r=0x%02X\r\n", addr, reg_addr);
+            DL_I2C_flushControllerTXFIFO(I2C_1_INST);
+            return -1;
+        }
+    }
 
+    timeout = I2C_RX_TIMEOUT;
     while (!((status = DL_I2C_getControllerStatus(I2C_1_INST))
-             & DL_I2C_CONTROLLER_STATUS_IDLE)) {}
+             & DL_I2C_CONTROLLER_STATUS_IDLE)) {
+        if (--timeout == 0) {
+            printf("I2C W IDLE timeout! a=0x%02X r=0x%02X\r\n", addr, reg_addr);
+            DL_I2C_flushControllerTXFIFO(I2C_1_INST);
+            return -1;
+        }
+    }
 
     if (status & I2C_MSTAT_NACK_MASK) {
         printf("I2C W NACK! a=0x%02X r=0x%02X\r\n", addr, reg_addr);
