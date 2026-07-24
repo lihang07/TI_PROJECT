@@ -79,10 +79,7 @@ float PID_Calc(PID_t *pid, float target, float current)
 }
 
 
-<<<<<<< HEAD
 
 
 
 
-=======
->>>>>>> 4d68ffcc09f1f3092d46a372526675469b97dff2

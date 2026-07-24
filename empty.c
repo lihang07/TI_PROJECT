@@ -592,7 +592,7 @@ void task5(void)
 {
     //角度环PID控制
     static uint8_t task5_state = 0;
-    static int16_t base_speed = 20;
+    static int16_t base_speed = 0;
     static float turn_out = 0;
     static uint8_t print_div = 0;
 
@@ -601,6 +601,7 @@ void task5(void)
         Motor_ResetLeftEncoder();
         Motor_ResetRightEncoder();
         Motor_Enable();
+        IMU_init();
 
         if(g_imu_data_valid){//如果已经初始化陀螺仪，则闭环目标为当前角度
             g_yaw_target = g_imu_ypr[0];
@@ -608,7 +609,7 @@ void task5(void)
             g_yaw_target = 0.0f;
         }
 
-        PID_Init(&g_yaw_pid, 2.0f, 0.0f, 0.3f, 100, -50, 50);
+        PID_Init(&g_yaw_pid, 1.5f, 0.0f, 0.5f, 100, -50, 50);
         task5_state = 1;
     }
 
@@ -623,9 +624,9 @@ void task5(void)
     int16_t right_ctrl = base_speed - (int16_t)turn_out;
 
     if (left_ctrl > 30) left_ctrl = 30;
-    if (left_ctrl < 10) left_ctrl = 10;
+    if (left_ctrl < -30) left_ctrl = -30;
     if (right_ctrl > 30) right_ctrl = 30;
-    if (right_ctrl < 10) right_ctrl = 10;
+    if (right_ctrl < -30) right_ctrl = -30;
 
     Motor_SetSpeed(left_ctrl, right_ctrl);
     
@@ -638,7 +639,11 @@ void task5(void)
     //数据输出
     if (print_div >= 20) {
         print_div = 0;
+        
+        //输出调试
+        printf("out:%f,%f,%d,%d\r\n",g_yaw_target,current_yaw,left_ctrl,right_ctrl);
 
+        //
         OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
         OLED_ShowFloat(25, 0, current_yaw, 3, 2, 16);
         OLED_Refresh();
