@@ -130,6 +130,26 @@ void Motor_SetSpeed(int16_t left_speed, int16_t right_speed)
     Motor_SetPWM(1, right_speed);
 }
 
+void Motor_SetSpeedPps(float left_pps, float right_pps)
+{
+    if (left_pps > MOTOR_MAX_SPEED_PPS) {
+        left_pps = MOTOR_MAX_SPEED_PPS;
+    } else if (left_pps < -MOTOR_MAX_SPEED_PPS) {
+        left_pps = -MOTOR_MAX_SPEED_PPS;
+    }
+
+    if (right_pps > MOTOR_MAX_SPEED_PPS) {
+        right_pps = MOTOR_MAX_SPEED_PPS;
+    } else if (right_pps < -MOTOR_MAX_SPEED_PPS) {
+        right_pps = -MOTOR_MAX_SPEED_PPS;
+    }
+
+    Motor_SetSpeed(
+        (int16_t)(left_pps * (float)MOTOR_SPEED_MAX / MOTOR_MAX_SPEED_PPS),
+        (int16_t)(right_pps * (float)MOTOR_SPEED_MAX / MOTOR_MAX_SPEED_PPS)
+    );
+}
+
 // 简介：设置左轮速度
 // 参数：speed - 左轮速度(-100~100)
 void Motor_SetLeftSpeed(int16_t speed)

@@ -400,17 +400,15 @@ void task1(void)
     stop();
 }
 
-
 void task2(void)
 {
     static uint8_t state = 0;
-    static Motor_PID_t left_pid;
-    static Motor_PID_t right_pid;
+    static PID_t left_pid;
+    static PID_t right_pid;
     static uint8_t print_count = 0;
 
-    /* 左右轮目标速度，单位：编码器脉冲/秒 */
-    const float left_target  = 50.0f;
-    const float right_target = 50.0f;
+    const float left_target_pps = 500.0f;
+    const float right_target_pps = 500.0f;
 
     /* 按下停止键后，允许下一次重新初始化 */
     if (!g_speed_loop_active) {
@@ -426,11 +424,8 @@ void task2(void)
          * 左右轮分别使用一个PID。
          * 初期可以使用相同参数，之后再分别调整。
          */
-        Motor_PID_Init(&left_pid,  0.10f, 0.00f, 0.02f);
-        Motor_PID_Init(&right_pid, 0.00f, 0.00f, 0.00f);
-
-        left_pid.target  = left_target;
-        right_pid.target = right_target;
+        PID_Init(&left_pid,  1.50f, 0.0005f, 0.00f, 500.0f, -1250.0f, 1250.0f);
+        PID_Init(&right_pid, 0.90f, 0.0005f, 0.00f, 500.0f, -1250.0f, 1250.0f);
 
         Timer_count = 0;
         g_speed_loop_active = 1;
@@ -452,50 +447,40 @@ void task2(void)
 
         /* 两个PID分别进行计算 */
         float left_output =
-            Motor_PID_Calculate(&left_pid, left_speed);
+            PID_Calc(&left_pid, left_target_pps, left_speed);
 
         float right_output =
-            Motor_PID_Calculate(&right_pid, right_speed);
+            PID_Calc(&right_pid, right_target_pps, right_speed);
 
         /* 限制PID输出范围，对应约5%～85%的PWM */
-        if (left_output > 85.0f) left_output = 85.0f;
-        if (left_output < 5.0f)  left_output = 5.0f;
-
-        if (right_output > 85.0f) right_output = 85.0f;
-        if (right_output < 5.0f)  right_output = 5.0f;
 
         /*
          * 本工程Motor_SetSpeed参数越小，实际PWM越大，
          * 因此需要使用100-output进行反向转换。
          */
-        int16_t left_cmd  = left_target-(int16_t)left_output;
-        int16_t right_cmd = right_target-(int16_t)right_output;
+        /* Target, feedback, PID correction, and motor target are all pulse/s. */
+        float left_motor_pps = left_target_pps + left_output;
+        float right_motor_pps = right_target_pps + right_output;
+
 
         /* 左右轮使用不同的控制量 */
-        Motor_SetSpeed(left_cmd, right_cmd);
+        Motor_SetSpeedPps(left_motor_pps, right_motor_pps);
 
         /* 每200ms打印一次，观察调速效果 */
         if (++print_count >= 20) {
             print_count = 0;
-
-            float left_output_pps =
-                left_output * MOTOR_MAX_SPEED_PPS / (float)MOTOR_SPEED_MAX;
-            float right_output_pps =
-                right_output * MOTOR_MAX_SPEED_PPS / (float)MOTOR_SPEED_MAX;
-            float left_motor_pps = Motor_CmdToSpeedPps(left_cmd);
-            float right_motor_pps = Motor_CmdToSpeedPps(right_cmd);
 
             printf(
                 "target L:%.0f R:%.0f pps | "
                 "speed L:%.0f R:%.0f pps | "
                 "pidout L:%.0f R:%.0f pps | "
                 "motor L:%.0f R:%.0f pps\r\n",
-                left_target,
-                right_target,
+                left_target_pps,
+                right_target_pps,
                 left_speed,
                 right_speed,
-                left_output_pps,
-                right_output_pps,
+                left_output,
+                right_output,
                 left_motor_pps,
                 right_motor_pps
             );
@@ -617,7 +602,7 @@ void task5(void)
     float current_yaw = g_imu_ypr[0];
     float err = Yaw_Error(g_yaw_target,current_yaw);
 
-    turn_out = PID_Calc(&g_yaw_pid,g_yaw_target,err);
+    turn_out = PID_Calc(&g_yaw_pid, err, 0.0f);
 
     int16_t left_ctrl  = base_speed + (int16_t)turn_out;
     int16_t right_ctrl = base_speed - (int16_t)turn_out;
@@ -644,4 +629,3 @@ void task5(void)
         OLED_Refresh();
     }
 }
-

@@ -39,6 +39,9 @@ void Motor_Backward(void);    // 后退（双轮同速）
 // 设置双轮独立速度（范围 -100 ~ 100）
 void Motor_SetSpeed(int16_t left_speed, int16_t right_speed);
 
+// Set independent wheel speeds in encoder pulses per second.
+void Motor_SetSpeedPps(float left_pps, float right_pps);
+
 // 设置单轮速度
 void Motor_SetLeftSpeed(int16_t speed);
 void Motor_SetRightSpeed(int16_t speed);
