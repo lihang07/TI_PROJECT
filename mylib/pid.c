@@ -44,8 +44,7 @@ void PID_Init(PID_t *pid, float kp, float ki, float kd,
 float PID_Calc(PID_t *pid, float target, float current)
 {
     /* 1. 计算当前误差：目标值减去当前值 */
-    pid->error = fabsf(target - current);
-
+    pid->error = target - current;
     /* 2. 积分项累加：误差累积用于消除稳态误差 */
     pid->integral += pid->error;
 

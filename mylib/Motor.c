@@ -377,8 +377,8 @@ static void Motor_SetPWM(uint8_t channel, int16_t speed)
     }
 
     real_speed = 100 - speed;
-    if(real_speed < 5)real_speed = 5;// 最小速度为5,避免过小的输入导致电机满速运行
-    if(real_speed >95)real_speed = 95;// 最大速度为95,避免过大的输入导致电机满速运行
+    if(real_speed < 6)real_speed = 6;// 最小速度为5,避免过小的输入导致电机满速运行
+    if(real_speed >94)real_speed = 94;// 最大速度为95,避免过大的输入导致电机满速运行
         
    
     // 计算PWM占空比

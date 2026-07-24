@@ -609,7 +609,7 @@ void task5(void)
             g_yaw_target = 0.0f;
         }
 
-        PID_Init(&g_yaw_pid, 1.5f, 0.0f, 0.5f, 100, -50, 50);
+        PID_Init(&g_yaw_pid, 0.45f, 0.0f, 0.1f, 100, -30, 30);
         task5_state = 1;
     }
 
@@ -623,10 +623,10 @@ void task5(void)
     int16_t left_ctrl  = base_speed + (int16_t)turn_out;
     int16_t right_ctrl = base_speed - (int16_t)turn_out;
 
-    if (left_ctrl > 30) left_ctrl = 30;
-    if (left_ctrl < -30) left_ctrl = -30;
-    if (right_ctrl > 30) right_ctrl = 30;
-    if (right_ctrl < -30) right_ctrl = -30;
+    if (left_ctrl > 20) left_ctrl = 20;
+    if (left_ctrl < -20) left_ctrl = -20;
+    if (right_ctrl > 20) right_ctrl = 20;
+    if (right_ctrl < -20) right_ctrl = -20;
 
     Motor_SetSpeed(left_ctrl, right_ctrl);
     
@@ -641,7 +641,7 @@ void task5(void)
         print_div = 0;
         
         //输出调试
-        printf("out:%f,%f,%d,%d\r\n",g_yaw_target,current_yaw,left_ctrl,right_ctrl);
+        printf("out:%f,%f,%d,%d,%f\r\n",g_yaw_target,current_yaw,left_ctrl,right_ctrl,turn_out);
 
         //
         OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
