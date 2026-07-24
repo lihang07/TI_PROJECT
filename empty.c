@@ -269,8 +269,8 @@ void stop(void)
  */
 static float plan_speed(float current_dist, float target_dist)
 {
-    const float max_speed   = 400.0f;  /* 最大目标速度(pulse/s)，对应约22%PWM */
-    const float min_speed   = 50.0f;   /* 最低目标速度，避免起步时PID输出为0 */
+    const float max_speed   = 300.0f;  /* 最大目标速度(pulse/s)，对应约18%PWM */
+    const float min_speed   = 40.0f;   /* 最低目标速度，避免起步时PID输出为0 */
     const float accel_dist  = 30.0f;   /* 加速段距离(cm) */
     const float decel_dist  = 40.0f;   /* 减速段距离(cm) */
     float speed;
@@ -376,23 +376,28 @@ void task1(void)
 
 void task2(void)
 {
-// 在你的循环里加这个
-    static float yaw_sum = 0;  // 累计角度
-    static float ypr[3];
-    if (!g_imu_data_valid) return;
-    ypr[0] = g_imu_ypr[0];
-    ypr[1] = g_imu_ypr[1];
-    ypr[2] = g_imu_ypr[2];
-    icm42688_real_data_t gv;
-    gv.x = g_imu_gyro[0];
-    gv.y = g_imu_gyro[1];
-    gv.z = g_imu_gyro[2];
+    //初始化参数
+    static uint8_t task2_state = 0;
 
-    printf("gx=%.2f gy=%.2f gz=%.2f  |  yaw_sum=%.1f\r\n",
-        ypr[0],ypr[1],ypr[2], yaw_sum);
+    if(task2_state == 0){
+        Motor_ResetLeftEncoder();
+        Motor_ResetRightEncoder();
+        task2_state = 1;
+    }
 
-    yaw_sum = ypr[0];
-    printf("Tima0:%d\r\n",Timer_count);
+    //开始任务
+    else{
+        //参数定义
+        static PID_t task1_Motor_PID;
+        static const float task1_target = 100.0f;
+        static float task1_current = 0.0f;
+         
+
+        PID_Init(&task1_Motor_PID, 1.0f, 0.0f, 0.1f, 100, 10, 50);
+
+
+    }
+    
 }
 
 

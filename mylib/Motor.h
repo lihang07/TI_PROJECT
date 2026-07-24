@@ -89,10 +89,10 @@ typedef struct {
 // 说明: 初始化左电机QEI和右电机CAPTURE，配置中断
 void Motor_Encoder_Init(void);
 
-// 获取左轮编码器速度（脉冲/秒，正负表示方向）
+// 获取左轮编码器速度（脉冲/秒，正负表示方向）,满速为2200
 int32_t Motor_GetLeftEncoderSpeed(void);
 
-// 获取右轮编码器速度（脉冲/秒，正负表示方向）
+// 获取右轮编码器速度（脉冲/秒，正负表示方向）,满速为2200
 int32_t Motor_GetRightEncoderSpeed(void);
 
 // 获取左轮编码器位置（累计脉冲数）

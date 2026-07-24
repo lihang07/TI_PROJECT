@@ -78,18 +78,8 @@ float PID_Calc(PID_t *pid, float target, float current)
     return pid->output;
 }
 
-PID_t speed_pid;
 
-PID_Init(&speed_pid, 1.0f, 0.02f, 0.1f, 500, -1000, 1000);
 
-while (1)
-{
-    float target_speed = 100.0f;
-    float current_speed = Get_Motor_Speed();
 
-    float pwm = PID_Calc(&speed_pid, target_speed, current_speed);
 
-    Motor_Set_PWM(pwm);
 
-    delay_ms(10);
-}

@@ -67,7 +67,7 @@ int16_t Ax_offset=0, Ay_offset=0;
  * ============================================ */
 float TTangles_gyro[7];
 float Angle_Final[3];
-float Kp = 10.0f;
+float Kp = 11.0f;
 
 /* ============================================
  * invSqrt1: 快速计算1/sqrt(x) (牛顿-拉弗森法)
@@ -210,7 +210,7 @@ static int8_t getVals(float *v) {
 /* ============================================
  * AHRS算法常量
  * ============================================ */
-#define AKi  0.001f    /* 积分系数(Accel Ki) - 积分项的增益 */
+#define AKi  0.005f    /* 积分系数(Accel Ki) - 积分项的增益 */
 
 /* AHRSupdate: AHRS姿态更新核心算法
  * 参数:

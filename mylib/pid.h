@@ -1,6 +1,7 @@
 #ifndef __PID_H
 #define __PID_H
 
+#include "mylib/delay.h"
 #include <stdint.h>
 
 /**
