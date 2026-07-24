@@ -8,6 +8,7 @@
 #include "mylib/icm42688.h"
 #include "mylib/IMU.h"
 #include "mylib/I2C_communication.h"
+#include "mylib/pid.h"
 #include <stdio.h>
 #include <math.h>
 
@@ -70,6 +71,13 @@ void task2(void);
 void task3(void);
 void task4(void);
 
+//临时函数任务区
+void task5(void);
+void task6(void);
+void task7(void);
+void task8(void);
+
+
 
 //==========  全局变量定义区 =============//
 
@@ -90,7 +98,10 @@ static uint32_t g_imu_last_tick = 0;     /* 上次IMU读取时的TIMA0_count，�
 static float g_imu_dt = 0.01f;           /* 最近一次IMU读取的真实dt（秒），各任务可直接使用 */
 static volatile uint32_t g_imu_sample_seq = 0;
 
-
+//==========IMU闭环控制区==========//
+PID_t g_yaw_pid;
+static float g_yaw_target = 0.0f;
+static uint32_t last_Timer_Count = 0;
 
 /* ==================== 主函数 ==================== */
 int main(void)
@@ -102,7 +113,7 @@ int main(void)
     Cartask state = status_stop;
 
     OLED_Init();
-        OLED_ColorTurn(0);
+    OLED_ColorTurn(0);
     OLED_DisplayTurn(0);
     IMU_init();
     OLED_Clear();
@@ -181,7 +192,7 @@ int main(void)
                 task3();
                 break;
             case(status_task4):
-                task4();
+                task5();
                 break;
 
         }
@@ -235,6 +246,15 @@ void TIMG7_IRQHandler(void)
     Motor_Encoder_UpdateSpeed();
     Timer_count++;
     g_imu_ready = 1;  /* 置位IMU更新标志，由主循环读取后清除 */
+}
+//1ms定时器
+void TIMA0_IRQHandler(void)
+{
+    DL_TimerA_clearInterruptStatus(TIMER_TICK_INST, DL_TIMERA_INTERRUPT_LOAD_EVENT);
+    
+    TIMA0_count++;
+
+
 }
 
 float IR_PID_Control(float err)
@@ -484,11 +504,61 @@ void task4(void)
 }
 
 
-void TIMA0_IRQHandler(void)
+
+void task5(void)
 {
-    DL_TimerA_clearInterruptStatus(TIMER_TICK_INST, DL_TIMERA_INTERRUPT_LOAD_EVENT);
+    //角度环PID控制
+    static uint8_t task5_state = 0;
+    static int16_t base_speed = 20;
+    static float turn_out = 0;
+    static uint8_t print_div = 0;
+
+    //初始化
+    if(task5_state == 0){
+        Motor_ResetLeftEncoder();
+        Motor_ResetRightEncoder();
+        Motor_Enable();
+
+        if(g_imu_data_valid){//如果已经初始化陀螺仪，则闭环目标为当前角度
+            g_yaw_target = g_imu_ypr[0];
+        } else {
+            g_yaw_target = 0.0f;
+        }
+
+        PID_Init(&g_yaw_pid, 2.0f, 0.0f, 0.3f, 100, -50, 50);
+        task5_state = 1;
+    }
+
+    if(!g_imu_data_valid)return;
+
+    float current_yaw = g_imu_ypr[0];
+    float err = Yaw_Error(g_yaw_target,current_yaw);
+
+    turn_out = PID_Calc(&g_yaw_pid,g_yaw_target,err);
+
+    int16_t left_ctrl  = base_speed + (int16_t)turn_out;
+    int16_t right_ctrl = base_speed - (int16_t)turn_out;
+
+    if (left_ctrl > 30) left_ctrl = 30;
+    if (left_ctrl < 10) left_ctrl = 10;
+    if (right_ctrl > 30) right_ctrl = 30;
+    if (right_ctrl < 10) right_ctrl = 10;
+
+    Motor_SetSpeed(left_ctrl, right_ctrl);
     
-    TIMA0_count++;
+    if(Timer_count >last_Timer_Count )
+    {
+        last_Timer_Count = Timer_count;
+        print_div++;
+    }
 
+    //数据输出
+    if (print_div >= 20) {
+        print_div = 0;
 
+        OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
+        OLED_ShowFloat(25, 0, current_yaw, 3, 2, 16);
+        OLED_Refresh();
+    }
 }
+

@@ -44,4 +44,7 @@ void IMU_GetCorrectedGyro(float *gyro);
  * 说明: 本项目中未使用,仅保持接口兼容性 */
 void MPU6050_InitAng_Offset(void);
 
+//imu角度转换
+ float Yaw_Error(float target, float current);
+
 #endif /* __IMU_H__ */

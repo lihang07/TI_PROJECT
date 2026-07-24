@@ -402,3 +402,11 @@ void IMU_GetCorrectedGyro(float *gyro) {
  *       此函数仅保持与MPU6050接口的兼容性
  */
 void MPU6050_InitAng_Offset(void) {}
+
+ float Yaw_Error(float target, float current)
+{
+    float err = target - current;
+    while (err > 180.0f) err -= 360.0f;
+    while (err < -180.0f) err += 360.0f;
+    return err;
+}
