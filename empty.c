@@ -312,112 +312,195 @@ static float plan_speed(float current_dist, float target_dist)
 }
 
 //任务一：直线行驶（速度闭环控制 + 梯形速度规划）
+// void task1(void)
+// {
+//     static uint8_t state = 0;               /* 状态机: 0=初始化, 1=运行中, 2=完成 */
+//     const float wheel_c       = PI * 6.5f;  /* 轮子周长(cm) */
+//     const float pulse_per_cm  = (ENCODER_PPR * 28.0f) / wheel_c; /* 每厘米脉冲数 = 13*28/周长 */
+//     const float target_dist   = 100.0f;     /* 目标距离(cm) */
+
+//     /* 如果速度闭环未激活（被stop()关闭），重置状态机 */
+//     if (!g_speed_loop_active) {
+//         state = 0;
+//     }
+
+//     /* ===== 状态0：初始化 ===== */
+//     if (state == 0) {
+//         Motor_ResetLeftEncoder();           /* 重置左编码器位置 */
+//         Motor_ResetRightEncoder();          /* 重置右编码器位置 */
+//         Motor_Enable();                     /* 使能电机 */
+
+ 
+//         Motor_PID_Init(&g_speed_pid, 0.45f, 0.2f, 0.0f); /* 初始化速度PID */
+//         g_speed_target      = 0;
+//         g_speed_loop_active = 1;            /* 激活速度闭环 */
+//         state = 1;
+//     }
+
+//     /* ===== 状态1：运行中 ===== */
+//     if (state == 1) {
+//         /* 等待编码器中断触发新的采样（约5ms一次） */
+//         if (Timer_count >= 1) {
+//             Timer_count = 0;                /* 消耗本次采样标志 */
+
+//             /* ① 计算当前行驶距离 */
+//             float current_dist = Motor_GetLeftEncoderPosition() / pulse_per_cm;
+
+//             /* ② 到达目标 → 停止 */
+//             if (current_dist >= target_dist) {
+//                 Motor_Disable();
+//                 /* 不在这里清零 g_speed_loop_active！
+//                  * 否则下次 task1() 会检测到 !g_speed_loop_active → state=0 → Motor_Enable()
+//                  * 重置由 stop()/按键0 负责 */
+//                 printf("Task1 done! Final dist: %.1f cm\r\n", current_dist);
+//                 state = 2;
+//                 return;
+//             }
+
+//             printf("yaw:%f pitch:%f roll:%f\r\n",
+//                    g_imu_ypr[0], g_imu_ypr[1], g_imu_ypr[2]);
+            
+//             /* ③ 梯形速度规划：根据当前距离计算目标速度 */
+//             g_speed_target = plan_speed(current_dist, target_dist);
+
+//             /* ④ 读取实际速度（左右轮平均） */
+//             float actual_speed = (Motor_GetLeftEncoderSpeed()
+//                                 + Motor_GetRightEncoderSpeed()) / 2.0f;
+
+//             /* ⑤ 速度闭环PID计算 */
+//             g_speed_pid.target = g_speed_target;
+//             float output = Motor_PID_Calculate(&g_speed_pid, actual_speed);
+
+//             /* ⑥ 输出限幅（output越大=需要越快） */
+//             if (output > 85.0f) output = 85.0f;
+//             if (output < 5.0f)  output = 5.0f;
+
+//             /* ⑦ 驱动电机
+//              * Motor_SetSpeed映射：值越大→电机越慢（0=全速, 100=停止）
+//              * PID输出：值越大→需要越快，因此用 100-output 反转映射 */
+//             int16_t motor_cmd = 100 - (int16_t)output;
+//             Motor_SetSpeed(motor_cmd, motor_cmd);
+
+//             /* 调试打印：每200ms(40次)打印一次，避免串口刷屏 */
+//             g_speed_print_cnt++;
+//             if (g_speed_print_cnt >= 40) {
+//                 g_speed_print_cnt = 0;
+//                 printf("dist:%.1f target:%.1f actual:%.1f out:%.1f cmd:%d\r\n",
+//                        current_dist, g_speed_target, actual_speed, output, motor_cmd);
+//             }
+//         }
+//     }
+
+//     /* 状态2：完成，什么都不做 */
+// }
+
+/* 任务1暂未启用，保留安全实现以满足主循环调用。 */
 void task1(void)
 {
-    static uint8_t state = 0;               /* 状态机: 0=初始化, 1=运行中, 2=完成 */
-    const float wheel_c       = PI * 6.5f;  /* 轮子周长(cm) */
-    const float pulse_per_cm  = (ENCODER_PPR * 28.0f) / wheel_c; /* 每厘米脉冲数 = 13*28/周长 */
-    const float target_dist   = 100.0f;     /* 目标距离(cm) */
+    stop();
+}
 
-    /* 如果速度闭环未激活（被stop()关闭），重置状态机 */
+
+void task2(void)
+{
+    static uint8_t state = 0;
+    static Motor_PID_t left_pid;
+    static Motor_PID_t right_pid;
+    static uint8_t print_count = 0;
+
+    /* 左右轮目标速度，单位：编码器脉冲/秒 */
+    const float left_target  = 50.0f;
+    const float right_target = 50.0f;
+
+    /* 按下停止键后，允许下一次重新初始化 */
     if (!g_speed_loop_active) {
         state = 0;
     }
 
-    /* ===== 状态0：初始化 ===== */
+    /* 第一次进入task2时初始化 */
     if (state == 0) {
-        Motor_ResetLeftEncoder();           /* 重置左编码器位置 */
-        Motor_ResetRightEncoder();          /* 重置右编码器位置 */
-        Motor_Enable();                     /* 使能电机 */
+        Motor_ResetLeftEncoder();
+        Motor_ResetRightEncoder();
 
- 
-        Motor_PID_Init(&g_speed_pid, 0.45f, 0.2f, 0.0f); /* 初始化速度PID */
-        g_speed_target      = 0;
-        g_speed_loop_active = 1;            /* 激活速度闭环 */
+        /*
+         * 左右轮分别使用一个PID。
+         * 初期可以使用相同参数，之后再分别调整。
+         */
+        Motor_PID_Init(&left_pid,  0.10f, 0.00f, 0.02f);
+        Motor_PID_Init(&right_pid, 0.00f, 0.00f, 0.00f);
+
+        left_pid.target  = left_target;
+        right_pid.target = right_target;
+
+        Timer_count = 0;
+        g_speed_loop_active = 1;
+
+        Motor_Enable();
         state = 1;
     }
 
-    /* ===== 状态1：运行中 ===== */
-    if (state == 1) {
-        /* 等待编码器中断触发新的采样（约5ms一次） */
-        if (Timer_count >= 1) {
-            Timer_count = 0;                /* 消耗本次采样标志 */
+    /* TIMG7每10ms更新一次编码器速度 */
+    if (state == 1 && Timer_count >= 1) {
+        Timer_count = 0;
 
-            /* ① 计算当前行驶距离 */
-            float current_dist = Motor_GetLeftEncoderPosition() / pulse_per_cm;
+        /* 分别读取左右轮实际速度 */
+        float left_speed =
+            fabsf((float)Motor_GetLeftEncoderSpeed());
 
-            /* ② 到达目标 → 停止 */
-            if (current_dist >= target_dist) {
-                Motor_Disable();
-                /* 不在这里清零 g_speed_loop_active！
-                 * 否则下次 task1() 会检测到 !g_speed_loop_active → state=0 → Motor_Enable()
-                 * 重置由 stop()/按键0 负责 */
-                printf("Task1 done! Final dist: %.1f cm\r\n", current_dist);
-                state = 2;
-                return;
-            }
+        float right_speed =
+            fabsf((float)Motor_GetRightEncoderSpeed());
 
-            printf("yaw:%f pitch:%f roll:%f\r\n",
-                   g_imu_ypr[0], g_imu_ypr[1], g_imu_ypr[2]);
-            
-            /* ③ 梯形速度规划：根据当前距离计算目标速度 */
-            g_speed_target = plan_speed(current_dist, target_dist);
+        /* 两个PID分别进行计算 */
+        float left_output =
+            Motor_PID_Calculate(&left_pid, left_speed);
 
-            /* ④ 读取实际速度（左右轮平均） */
-            float actual_speed = (Motor_GetLeftEncoderSpeed()
-                                + Motor_GetRightEncoderSpeed()) / 2.0f;
+        float right_output =
+            Motor_PID_Calculate(&right_pid, right_speed);
 
-            /* ⑤ 速度闭环PID计算 */
-            g_speed_pid.target = g_speed_target;
-            float output = Motor_PID_Calculate(&g_speed_pid, actual_speed);
+        /* 限制PID输出范围，对应约5%～85%的PWM */
+        if (left_output > 85.0f) left_output = 85.0f;
+        if (left_output < 5.0f)  left_output = 5.0f;
 
-            /* ⑥ 输出限幅（output越大=需要越快） */
-            if (output > 85.0f) output = 85.0f;
-            if (output < 5.0f)  output = 5.0f;
+        if (right_output > 85.0f) right_output = 85.0f;
+        if (right_output < 5.0f)  right_output = 5.0f;
 
-            /* ⑦ 驱动电机
-             * Motor_SetSpeed映射：值越大→电机越慢（0=全速, 100=停止）
-             * PID输出：值越大→需要越快，因此用 100-output 反转映射 */
-            int16_t motor_cmd = 100 - (int16_t)output;
-            Motor_SetSpeed(motor_cmd, motor_cmd);
+        /*
+         * 本工程Motor_SetSpeed参数越小，实际PWM越大，
+         * 因此需要使用100-output进行反向转换。
+         */
+        int16_t left_cmd  = left_target-(int16_t)left_output;
+        int16_t right_cmd = right_target-(int16_t)right_output;
 
-            /* 调试打印：每200ms(40次)打印一次，避免串口刷屏 */
-            g_speed_print_cnt++;
-            if (g_speed_print_cnt >= 40) {
-                g_speed_print_cnt = 0;
-                printf("dist:%.1f target:%.1f actual:%.1f out:%.1f cmd:%d\r\n",
-                       current_dist, g_speed_target, actual_speed, output, motor_cmd);
-            }
+        /* 左右轮使用不同的控制量 */
+        Motor_SetSpeed(left_cmd, right_cmd);
+
+        /* 每200ms打印一次，观察调速效果 */
+        if (++print_count >= 20) {
+            print_count = 0;
+
+            float left_output_pps =
+                left_output * MOTOR_MAX_SPEED_PPS / (float)MOTOR_SPEED_MAX;
+            float right_output_pps =
+                right_output * MOTOR_MAX_SPEED_PPS / (float)MOTOR_SPEED_MAX;
+            float left_motor_pps = Motor_CmdToSpeedPps(left_cmd);
+            float right_motor_pps = Motor_CmdToSpeedPps(right_cmd);
+
+            printf(
+                "target L:%.0f R:%.0f pps | "
+                "speed L:%.0f R:%.0f pps | "
+                "pidout L:%.0f R:%.0f pps | "
+                "motor L:%.0f R:%.0f pps\r\n",
+                left_target,
+                right_target,
+                left_speed,
+                right_speed,
+                left_output_pps,
+                right_output_pps,
+                left_motor_pps,
+                right_motor_pps
+            );
         }
     }
-
-    /* 状态2：完成，什么都不做 */
-}
-
-void task2(void)
-{
-    //初始化参数
-    static uint8_t task2_state = 0;
-
-    if(task2_state == 0){
-        Motor_ResetLeftEncoder();
-        Motor_ResetRightEncoder();
-        task2_state = 1;
-    }
-
-    //开始任务
-    else{
-        //参数定义
-        static PID_t task1_Motor_PID;
-        static const float task1_target = 100.0f;
-        static float task1_current = 0.0f;
-         
-
-        PID_Init(&task1_Motor_PID, 1.0f, 0.0f, 0.1f, 100, 10, 50);
-
-
-    }
-    
 }
 
 

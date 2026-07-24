@@ -8,6 +8,7 @@
 #define MOTOR_SPEED_MAX      100
 #define MOTOR_SPEED_MIN      -100
 #define MOTOR_SPEED_DEFAULT  50      // 默认速度
+#define MOTOR_MAX_SPEED_PPS  2300.0f // cmd=+/-100 约等于 +/-2300 pulse/s
 
 // ==================== PID参数结构体（预留） ====================
 typedef struct {
@@ -45,6 +46,9 @@ void Motor_SetRightSpeed(int16_t speed);
 // 获取当前速度
 int16_t Motor_GetLeftSpeed(void);
 int16_t Motor_GetRightSpeed(void);
+
+// 将电机命令值(-100~100)换算为估算编码器速度(pulse/s)
+float Motor_CmdToSpeedPps(int16_t cmd);
 
 // ==================== 转向控制（差速控制 - 循迹核心） ====================
 // 差速转向：两轮速度不同实现转向
