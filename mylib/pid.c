@@ -45,7 +45,10 @@ float PID_Calc(PID_t *pid, float target, float current)
 {
     /* 1. 计算当前误差：目标值减去当前值 */
     pid->error = target - current;
+<<<<<<< HEAD
 
+=======
+>>>>>>> ea1823ee7be4ef2eeb94d3766b122a3027185520
     /* 2. 积分项累加：误差累积用于消除稳态误差 */
     pid->integral += pid->error;
 
@@ -77,3 +80,12 @@ float PID_Calc(PID_t *pid, float target, float current)
     /* 返回计算结果 */
     return pid->output;
 }
+<<<<<<< HEAD
+=======
+
+
+
+
+
+
+>>>>>>> ea1823ee7be4ef2eeb94d3766b122a3027185520

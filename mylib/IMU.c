@@ -287,8 +287,13 @@ static void AHRSupdate(float gx,float gy,float gz,float ax,float ay,float az,
      * 比例项: Kp * ex
      * 含义: 当前误差的直接补偿,提供即时响应
      *
-     * 总补偿: gx += Kp*ex + exInt */
-    if(ex!=0||ey!=0||ez!=0){
+     * 总补偿: gx += Kp*ex + exInt
+     *
+     * 快速转动保护: 当角速度超过300°/s(约5.24rad/s)时,
+     * 加速度计会测到向心加速度,此时跳过PI修正,
+     * 纯靠陀螺仪积分,避免加速度计"帮倒忙" */
+    float gyro_mag = gx*gx + gy*gy + gz*gz;
+    if (gyro_mag < 27.5f && (ex!=0||ey!=0||ez!=0)) {
         exInt+=ex*AKi*dt_seconds; eyInt+=ey*AKi*dt_seconds; ezInt+=ez*AKi*dt_seconds;
         gx+=Kp*ex+exInt; gy+=Kp*ey+eyInt; gz+=Kp*ez+ezInt;
     }
