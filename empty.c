@@ -389,8 +389,8 @@ void task2(void)
     static uint8_t print_count = 0;
 
     /* 左右轮目标速度，单位：编码器脉冲/秒 */
-    const float left_target  = 100.0f;
-    const float right_target = 100.0f;
+    const float left_target  = 50.0f;
+    const float right_target = 50.0f;
 
     /* 按下停止键后，允许下一次重新初始化 */
     if (!g_speed_loop_active) {
@@ -406,8 +406,8 @@ void task2(void)
          * 左右轮分别使用一个PID。
          * 初期可以使用相同参数，之后再分别调整。
          */
-        Motor_PID_Init(&left_pid,  0.45f, 0.20f, 0.00f);
-        Motor_PID_Init(&right_pid, 0.45f, 0.20f, 0.00f);
+        Motor_PID_Init(&left_pid,  0.10f, 0.00f, 0.02f);
+        Motor_PID_Init(&right_pid, 0.00f, 0.00f, 0.00f);
 
         left_pid.target  = left_target;
         right_pid.target = right_target;
@@ -448,8 +448,8 @@ void task2(void)
          * 本工程Motor_SetSpeed参数越小，实际PWM越大，
          * 因此需要使用100-output进行反向转换。
          */
-        int16_t left_cmd  = 100 - (int16_t)left_output;
-        int16_t right_cmd = 100 - (int16_t)right_output;
+        int16_t left_cmd  = left_target-(int16_t)left_output;
+        int16_t right_cmd = right_target-(int16_t)right_output;
 
         /* 左右轮使用不同的控制量 */
         Motor_SetSpeed(left_cmd, right_cmd);
@@ -458,16 +458,26 @@ void task2(void)
         if (++print_count >= 20) {
             print_count = 0;
 
+            float left_output_pps =
+                left_output * MOTOR_MAX_SPEED_PPS / (float)MOTOR_SPEED_MAX;
+            float right_output_pps =
+                right_output * MOTOR_MAX_SPEED_PPS / (float)MOTOR_SPEED_MAX;
+            float left_motor_pps = Motor_CmdToSpeedPps(left_cmd);
+            float right_motor_pps = Motor_CmdToSpeedPps(right_cmd);
+
             printf(
-                "target L:%.0f R:%.0f | "
-                "speed L:%.0f R:%.0f | "
-                "out L:%.1f R:%.1f\r\n",
+                "target L:%.0f R:%.0f pps | "
+                "speed L:%.0f R:%.0f pps | "
+                "pidout L:%.0f R:%.0f pps | "
+                "motor L:%.0f R:%.0f pps\r\n",
                 left_target,
                 right_target,
                 left_speed,
                 right_speed,
-                left_output,
-                right_output
+                left_output_pps,
+                right_output_pps,
+                left_motor_pps,
+                right_motor_pps
             );
         }
     }

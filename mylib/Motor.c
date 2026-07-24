@@ -158,6 +158,17 @@ int16_t Motor_GetRightSpeed(void)
     return g_right_speed;
 }
 
+float Motor_CmdToSpeedPps(int16_t cmd)
+{
+    if (cmd > MOTOR_SPEED_MAX) {
+        cmd = MOTOR_SPEED_MAX;
+    } else if (cmd < MOTOR_SPEED_MIN) {
+        cmd = MOTOR_SPEED_MIN;
+    }
+
+    return ((float)cmd * MOTOR_MAX_SPEED_PPS) / (float)MOTOR_SPEED_MAX;
+}
+
 // ==================== 转向控制（差速控制 - 循迹核心） ====================
 // 简介：左转（降低左轮速度，右轮正常）
 // 参数：speed - 基础速度(-100~100)
