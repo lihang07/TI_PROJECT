@@ -675,6 +675,16 @@ int32_t Motor_GetLeftEncoderPosition(void)
 {
     return g_left_encoder.position;
 }
+/*
+ * @brief  转换编码器速度为PWM值
+ * @param  speed: 编码器速度（脉冲/秒）
+ * @retval PWM值（0.0f ~ 100.0f）
+ * @note   2200.0f 是满速，根据需要调整。
+ */
+float Motor_SpeedToPWM(int32_t speed)
+{
+    return (float)(speed / 23.0f);
+}
 
 /* 简介: 获取右编码器累计位置（脉冲计数）
  * 返回: 右轮累计位置（正数=正转累计，负数=反转累计）
