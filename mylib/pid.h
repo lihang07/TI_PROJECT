@@ -52,4 +52,8 @@ void PID_Init(PID_t *pid, float kp, float ki, float kd,
  */
 float PID_Calc(PID_t *pid, float target, float current);
 
+
+float PID_GetError(float target, float current);
+
+
 #endif /* __PID_H */

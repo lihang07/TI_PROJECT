@@ -84,9 +84,7 @@ void task8(void);
 //任务1区域：速度闭环控制
 PID_t g_speed_pid;         /* 速度闭环PID结构体 */
 PID_t g_yaw_pid;         /* 陀螺仪闭环PID结构体 */
-static float      task1_speed_target = 0;   /* 目标速度(pulse/s) */
-static uint8_t    task1_speed_loop_active = 0; /* 速度闭环激活标志 */
-static uint8_t    task1_speed_print_cnt = 0;   /* 调试打印计数器，降频用 */
+
 static volatile uint32_t TIMA0_count = 0;
 
 //==========  IMU全局数据区（主循环读取，各任务共享） ==========//
@@ -266,7 +264,7 @@ float IR_PID_Control(float err)
 
 void stop(void)
 {
-    g_speed_loop_active = 0;    /* 关闭速度闭环 */
+
 
     Motor_Disable();//关闭电机
    // printf("current_left pos:%d\r\n",Motor_GetLeftEncoderPosition());
@@ -297,10 +295,7 @@ void task2(void)
     const float left_target_pps = 500.0f;
     const float right_target_pps = 500.0f;
 
-    /* 按下停止键后，允许下一次重新初始化 */
-    if (!g_speed_loop_active) {
-        state = 0;
-    }
+
 
     /* 第一次进入task2时初始化 */
     if (state == 0) {
@@ -315,7 +310,7 @@ void task2(void)
         PID_Init(&right_pid, 0.91f, 0.005f, 0.0f, 500.0f, -1250.0f, 1250.0f);
 
         Timer_count = 0;
-        g_speed_loop_active = 1;
+
 
         Motor_Enable();
         state = 1;
@@ -523,24 +518,22 @@ void task1(void)
     const float pulse_per_cm  = (ENCODER_PPR * 28.0f) / wheel_c; /* 每厘米脉冲数 = 13*28/周长 */
     const float target_dist   = 100.0f;     /* 目标距离(cm) */
 
-    /* 如果速度闭环未激活（被stop()关闭），重置状态机 */
-    if (!g_speed_loop_active) {
-        state = 0;
-    }
+
 
     /* ===== 状态0：初始化 ===== */
     if (state == 0) {
         Motor_ResetLeftEncoder();           /* 重置左编码器位置 */
         Motor_ResetRightEncoder();          /* 重置右编码器位置 */
         Motor_Enable();                     /* 使能电机 */
-        IMU_Init();                         //初始化陀螺仪
+        IMU_init();                         //初始化陀螺仪
         
         if(g_imu_data_valid){//如果已经初始化陀螺仪，则闭环目标为当前角度
             g_yaw_target = g_imu_ypr[0];
         } else {
             g_yaw_target = 0.0f;
         }
-        PID_Init(&g_yaw_pid, 0.45f, 0.0f, 0.1f, 100, -30, 30);
+        PID_Init(&g_yaw_pid, 0.35f, 0.0f, 0.08f, 100, -20, 20);//初始化角度环PID
+        PID_Init(&g_speed_pid, 1.0f, 0.0f, 0.1f, 100, 0, 40);//初始化速度环PID
         state = 1;
     }
 
@@ -554,17 +547,32 @@ void task1(void)
         // }
     if(!g_imu_data_valid)return;
 
+    static float turn_out = 0.0f;
+    static float speed_out = 0.0f;
+    static const int16_t base_speed = 0;
+    const float target_dist   = 100.0f;     /* 目标距离(cm) */
+
     float current_yaw = g_imu_ypr[0];
-    float err = Yaw_Error(g_yaw_target,current_yaw);
+    float yaw_err = Yaw_Error(g_yaw_target,current_yaw);
 
-    turn_out = PID_Calc(&g_yaw_pid, err, 0.0f);
+    turn_out = PID_Calc(&g_yaw_pid, yaw_err, g_yaw_target);
 
-    int16_t left_ctrl  = base_speed + (int16_t)turn_out;
-    int16_t right_ctrl = base_speed - (int16_t)turn_out;
+    
 
-    turn_out = PID_Calc(&g_yaw_pid, err, 0.0f);//得到角度量输出
+    float current_position = Motor_GetLeftEncoderPosition() / pulse_per_cm;
+    float speed_err = PID_GetError(target_dist,current_position);
 
-    float 
+    speed_out = PID_Calc(&g_speed_pid, speed_err, current_position);
+
+    int8_t left_out = speed_out + turn_out;
+    int8_t right_out = speed_out - turn_out;
+
+    if (left_out > 60) left_out = 20;
+    if (left_out < -20) left_out = -20;
+    if (right_out > 60) right_out = 60;
+    if (right_out < -20) right_out = -20;
+
+    Motor_SetSpeed(left_out, right_out);
 
     }
 
