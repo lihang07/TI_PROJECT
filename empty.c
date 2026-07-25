@@ -424,8 +424,8 @@ void task2(void)
          * 左右轮分别使用一个PID。
          * 初期可以使用相同参数，之后再分别调整。
          */
-        PID_Init(&left_pid,  1.50f, 0.0005f, 0.00f, 500.0f, -1250.0f, 1250.0f);
-        PID_Init(&right_pid, 0.90f, 0.0005f, 0.00f, 500.0f, -1250.0f, 1250.0f);
+        PID_Init(&left_pid,  0.91f, 0.005f, 0.1f, 500.0f, -1250.0f, 1250.0f);
+        PID_Init(&right_pid, 0.91f, 0.005f, 0.0f, 500.0f, -1250.0f, 1250.0f);
 
         Timer_count = 0;
         g_speed_loop_active = 1;
