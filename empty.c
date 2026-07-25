@@ -100,7 +100,6 @@ static volatile uint32_t g_imu_sample_seq = 0;
 //==========IMU闭环控制区==========//
 static float g_yaw_target = 0.0f;
 static uint32_t last_Timer_Count = 0;
-static uint8_t g_task2_reset_request = 1;
 
 /* ==================== 主函数 ==================== */
 int main(void)
@@ -266,7 +265,6 @@ float IR_PID_Control(float err)
 void stop(void)
 {
 
-    g_task2_reset_request = 1;
 
     Motor_Disable();//关闭电机
    // printf("current_left pos:%d\r\n",Motor_GetLeftEncoderPosition());
@@ -294,18 +292,9 @@ void task2(void)
     static PID_t right_pid;
     static uint8_t print_count = 0;
 
-    const float wheel_c = PI * 6.5f;
-    const float pulse_per_cm = (ENCODER_PPR * 28.0f) / wheel_c;
-    const float target_dist_cm = 100.0f;
-    const float position_kp = 10.0f;
-    const float max_target_pps = 500.0f;
-    const float min_target_pps = 80.0f;
-    const float stop_tolerance_cm = 0.8f;
+    const float left_target_pps = 500.0f;
+    const float right_target_pps = 500.0f;
 
-    if (g_task2_reset_request) {
-        state = 0;
-        g_task2_reset_request = 0;
-    }
 
 
     /* 第一次进入task2时初始化 */
@@ -331,27 +320,6 @@ void task2(void)
     if (state == 1 && Timer_count >= 1) {
         Timer_count = 0;
 
-        /* 位置外环：100cm目标距离 -> 目标速度(pulse/s) */
-        float left_pos_cm =
-            fabsf((float)Motor_GetLeftEncoderPosition()) / pulse_per_cm;
-
-        float right_pos_cm =
-            fabsf((float)Motor_GetRightEncoderPosition()) / pulse_per_cm;
-
-        float current_dist_cm = (left_pos_cm + right_pos_cm) / 2.0f;
-        float position_error_cm = target_dist_cm - current_dist_cm;
-
-        if (position_error_cm <= stop_tolerance_cm) {
-            Motor_Disable();
-            state = 2;
-            printf("task2 done, dist:%.1f cm\r\n", current_dist_cm);
-            return;
-        }
-
-        float target_pps = position_kp * position_error_cm;
-        if (target_pps > max_target_pps) target_pps = max_target_pps;
-        if (target_pps < min_target_pps) target_pps = min_target_pps;
-
         /* 分别读取左右轮实际速度 */
         float left_speed =
             fabsf((float)Motor_GetLeftEncoderSpeed());
@@ -361,20 +329,20 @@ void task2(void)
 
         /* 两个PID分别进行计算 */
         float left_output =
-            PID_Calc(&left_pid, target_pps, left_speed);
+            PID_Calc(&left_pid, left_target_pps, left_speed);
 
         float right_output =
-            PID_Calc(&right_pid, target_pps, right_speed);
+            PID_Calc(&right_pid, right_target_pps, right_speed);
 
         /* 限制PID输出范围，对应约5%～85%的PWM */
 
         /*
          * 本工程Motor_SetSpeed参数越小，实际PWM越大，
          * 因此需要使用100-output进行反向转换。
-        */
+         */
         /* Target, feedback, PID correction, and motor target are all pulse/s. */
-        float left_motor_pps = target_pps + left_output;
-        float right_motor_pps = target_pps + right_output;
+        float left_motor_pps = left_target_pps + left_output;
+        float right_motor_pps = right_target_pps + right_output;
 
 
         /* 左右轮使用不同的控制量 */
@@ -385,10 +353,9 @@ void task2(void)
             print_count = 0;
 
             printf(
-                "pos:%.1f err:%.1f target:%.1f out:%f,%f\r\n",
-                current_dist_cm,
-                position_error_cm,
-                target_pps,
+                "out:%f,%f,%f,%f\r\n",
+                left_target_pps,
+                right_target_pps,
                 left_output,
                 right_output
             );
@@ -457,12 +424,11 @@ void task3(void)
         icm42688_raw_data_t raw_gyro;
         print_div = 0;
         (void)ICM42688_ReadGyroRaw(&raw_gyro);
-        printf("dt:%.4f YPR:%.2f %.2f %.2f | gyro:%.2f %.2f %.2f rawZ:%d | sum:%.2f %.2f %.2f yawSum:%.2f\r\n",
+        printf("dt:%.4f YPR:%.2f %.2f %.2f | gyro:%.2f %.2f %.2f rawZ:%d | sum:%.2f %.2f %.2f\r\n",
                g_imu_dt, yaw, pitch, roll,
-               g_imu_gyro[0], g_imu_gyro[1], gz,
+               g_imu_gyro[0], g_imu_gyro[1], g_imu_gyro[2],
                raw_gyro.z,
-               gyro_total_x, gyro_total_y, gyro_total_z,
-               yaw_total);
+               gyro_total_x, gyro_total_y, gyro_total_z);
         OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
         OLED_ShowFloat(25, 0, yaw, 3, 2, 16);
         OLED_ShowString(0, 18, (uint8_t *)"pitch:", 16);
@@ -476,8 +442,36 @@ void task3(void)
 
 void task4(void)
 {
-    printf("TimA0:%d\r\n",TIMA0_count);
-    delay_ms(100);
+    //初始化任务2，进入直行状态，直到采集到循迹数据
+    static uint8_t task2_state = 0;
+    static uint8_t task2_state_straight = 1;//进入直线行驶
+
+    if(task2_state == 0){
+        Motor_ResetLeftEncoder();
+        Motor_ResetRightEncoder();
+        Motor_Enable();
+        IMU_init();
+        PID_Init(&g_yaw_pid, 0.45f, 0.0f, 0.1f, 100, -30, 30);
+        task2_state = 1;
+    }
+
+    if(task2_state){
+        if(task2_state_straight){
+            g_yaw_target = g_imu_ypr[0];//获取当前陀螺仪数值作为目标进行直线闭环
+            
+            if(!g_imu_data_valid)return;
+            
+            float current_yaw = g_imu_ypr[0];
+            //角度和速度双环
+
+        }   
+        
+        else{
+            //循迹和速度双环
+        }
+    }
+
+
 }
 
 
@@ -583,6 +577,8 @@ void task1(void)
 
     static float turn_out = 0.0f;
     static float speed_out = 0.0f;
+    static const int16_t base_speed = 0;
+    const float target_dist   = 100.0f;     /* 目标距离(cm) */
 
     float current_yaw = g_imu_ypr[0];
     float yaw_err = Yaw_Error(g_yaw_target,current_yaw);
@@ -632,5 +628,3 @@ void task1(void)
 
     
 }
-
-
