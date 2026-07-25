@@ -100,6 +100,7 @@ static volatile uint32_t g_imu_sample_seq = 0;
 //==========IMU闭环控制区==========//
 static float g_yaw_target = 0.0f;
 static uint32_t last_Timer_Count = 0;
+static uint8_t g_task6_reset_request = 1;
 
 /* ==================== 主函数 ==================== */
 int main(void)
@@ -265,6 +266,7 @@ float IR_PID_Control(float err)
 void stop(void)
 {
 
+    g_task6_reset_request = 1;
 
     Motor_Disable();//关闭电机
    // printf("current_left pos:%d\r\n",Motor_GetLeftEncoderPosition());
@@ -541,15 +543,17 @@ void task5(void)
 
 void task6(void)
 {
-    static uint8_t g_task6_reset_request;
-
     static uint8_t state = 0;
     static uint8_t ir[8] = {0};
     static uint8_t black_line_count = 0;
     static uint8_t no_line_count = 0;
+    static uint8_t straight_setup_pending = 1;
     static uint8_t print_div = 0;
 
-    const int16_t straight_speed = 28;
+    const float wheel_c = PI * 6.5f;
+    const float pulse_per_cm = (ENCODER_PPR * 28.0f) / wheel_c;
+    const float straight_target_cm = 100.0f;
+    const int16_t min_straight_speed = 8;
     const int16_t track_base_speed = 25;
     const int16_t max_diff = 35;
     const uint8_t line_confirm_count = 3;
@@ -559,6 +563,7 @@ void task6(void)
         state = 0;
         black_line_count = 0;
         no_line_count = 0;
+        straight_setup_pending = 1;
         ir_last_err = 0.0f;
         g_task6_reset_request = 0;
     }
@@ -571,7 +576,7 @@ void task6(void)
         no_line_count = 0;
         ir_last_err = 0.0f;
         g_yaw_target = 0.0f;
-        PID_Init(&g_yaw_pid, 0.45f, 0.0f, 0.10f, 100.0f, -30.0f, 30.0f);
+        straight_setup_pending = 1;
         state = 1;
         printf("task6: gyro straight 1\r\n");
     }
@@ -595,18 +600,37 @@ void task6(void)
     }
 
     if (state == 1 || state == 3) {
+        if (straight_setup_pending) {
+            Motor_ResetLeftEncoder();
+            Motor_ResetRightEncoder();
+            PID_Init(&g_yaw_pid, 0.35f, 0.0f, 0.08f,
+                     100.0f, -20.0f, 20.0f);
+            PID_Init(&g_speed_pid, 0.45f, 0.1f, 0.01f,
+                     50.0f, 5.0f, 60.0f);
+            straight_setup_pending = 0;
+        }
+
         if (!g_imu_data_valid) {
             Motor_Disable();
             return;
         }
 
-        float yaw_err = g_yaw_target - g_imu_ypr[0];
-        if (yaw_err > 180.0f) yaw_err -= 360.0f;
-        if (yaw_err < -180.0f) yaw_err += 360.0f;
-        float turn_out = PID_Calc(&g_yaw_pid, yaw_err, 0.0f);
+        float current_yaw = g_imu_ypr[0];
+        float turn_out = PID_Calc(&g_yaw_pid, g_yaw_target, current_yaw);
+        float left_pos_cm =
+            fabsf((float)Motor_GetLeftEncoderPosition()) / pulse_per_cm;
+        float right_pos_cm =
+            fabsf((float)Motor_GetRightEncoderPosition()) / pulse_per_cm;
+        float current_dist_cm = (left_pos_cm + right_pos_cm) / 2.0f;
+        float speed_out =
+            PID_Calc(&g_speed_pid, straight_target_cm, current_dist_cm);
 
-        int16_t left = straight_speed + (int16_t)turn_out;
-        int16_t right = straight_speed - (int16_t)turn_out;
+        int16_t left = (int16_t)(speed_out - turn_out);
+        int16_t right = (int16_t)(speed_out + turn_out);
+        if (left < min_straight_speed) left = min_straight_speed;
+        if (right < min_straight_speed) right = min_straight_speed;
+        if (left > 60) left = 60;
+        if (right > 60) right = 60;
         Motor_Enable();
         Motor_SetSpeed(left, right);
 
@@ -623,6 +647,7 @@ void task6(void)
 
             if (state == 2) {
                 state = 3;
+                straight_setup_pending = 1;
                 printf("task6: gyro straight 2\r\n");
             } else {
                 Motor_Disable();
