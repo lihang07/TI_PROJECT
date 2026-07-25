@@ -517,7 +517,7 @@ void task1(void)
     const float wheel_c       = PI * 6.5f;  /* 轮子周长(cm) */
     const float pulse_per_cm  = (ENCODER_PPR * 28.0f) / wheel_c; /* 每厘米脉冲数 = 13*28/周长 */
     const float target_dist   = 100.0f;     /* 目标距离(cm) */
-
+    static uint8_t print_div = 0;
 
 
     /* ===== 状态0：初始化 ===== */
@@ -533,7 +533,7 @@ void task1(void)
             g_yaw_target = 0.0f;
         }
         PID_Init(&g_yaw_pid, 0.35f, 0.0f, 0.08f, 100, -20, 20);//初始化角度环PID
-        PID_Init(&g_speed_pid, 1.0f, 0.0f, 0.1f, 100, 0, 40);//初始化速度环PID
+        PID_Init(&g_speed_pid, 0.45f, 0.1f, 0.01f, 50, 5, 60);//初始化速度环PID
         state = 1;
     }
 
@@ -555,17 +555,17 @@ void task1(void)
     float current_yaw = g_imu_ypr[0];
     float yaw_err = Yaw_Error(g_yaw_target,current_yaw);
 
-    turn_out = PID_Calc(&g_yaw_pid, yaw_err, g_yaw_target);
+    turn_out = PID_Calc(&g_yaw_pid, g_yaw_target, g_yaw_target);
 
     
 
     float current_position = Motor_GetLeftEncoderPosition() / pulse_per_cm;
     float speed_err = PID_GetError(target_dist,current_position);
 
-    speed_out = PID_Calc(&g_speed_pid, speed_err, current_position);
+    speed_out = PID_Calc(&g_speed_pid, target_dist, current_position);
 
-    int8_t left_out = speed_out + turn_out;
-    int8_t right_out = speed_out - turn_out;
+    int8_t left_out = speed_out - turn_out;
+    int8_t right_out = speed_out + turn_out;
 
     if (left_out > 60) left_out = 20;
     if (left_out < -20) left_out = -20;
@@ -574,9 +574,31 @@ void task1(void)
 
     Motor_SetSpeed(left_out, right_out);
 
+    if(Timer_count >last_Timer_Count )
+    {
+        last_Timer_Count = Timer_count;
+        print_div++;
     }
 
+    //数据输出
+    if (print_div >= 5) {
+        print_div = 0;
+        
+        //输出调试
+        printf("out:%f,%f,%d,%d\r\n",target_dist,current_position,left_out,right_out);
 
+        //
+        OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
+        OLED_ShowFloat(25, 0, current_yaw, 3, 2, 16);
+        OLED_ShowFloat(25,20, Motor_GetLeftEncoderPosition(), 6, 0, 16);
+        OLED_Refresh();
+    }
+
+    if(current_position >= 100.0f)Motor_Disable();
+
+    }
+
+    
 }
 
 
