@@ -183,7 +183,7 @@ int main(void)
                 task1();
                 break;
             case(status_task2):
-                task2();
+                task6();
                 break;
             case(status_task3):
                
@@ -539,6 +539,129 @@ void task5(void)
 }
 
 
+void task6(void)
+{
+    static uint8_t g_task6_reset_request;
+
+    static uint8_t state = 0;
+    static uint8_t ir[8] = {0};
+    static uint8_t black_line_count = 0;
+    static uint8_t no_line_count = 0;
+    static uint8_t print_div = 0;
+
+    const int16_t straight_speed = 28;
+    const int16_t track_base_speed = 25;
+    const int16_t max_diff = 35;
+    const uint8_t line_confirm_count = 3;
+    const uint8_t lost_line_confirm_count = 5;
+
+    if (g_task6_reset_request) {
+        state = 0;
+        black_line_count = 0;
+        no_line_count = 0;
+        ir_last_err = 0.0f;
+        g_task6_reset_request = 0;
+    }
+
+    if (state == 0) {
+        Motor_ResetLeftEncoder();
+        Motor_ResetRightEncoder();
+        Timer_count = 0;
+        black_line_count = 0;
+        no_line_count = 0;
+        ir_last_err = 0.0f;
+        g_yaw_target = 0.0f;
+        PID_Init(&g_yaw_pid, 0.45f, 0.0f, 0.10f, 100.0f, -30.0f, 30.0f);
+        state = 1;
+        printf("task6: gyro straight 1\r\n");
+    }
+
+    if (Timer_count < 1) {
+        return;
+    }
+    Timer_count = 0;
+
+    IR_Read(ir);
+    if (IR_GetSensorCount(ir) > 0) {
+        if (black_line_count < line_confirm_count) {
+            black_line_count++;
+        }
+        no_line_count = 0;
+    } else {
+        if (no_line_count < lost_line_confirm_count) {
+            no_line_count++;
+        }
+        black_line_count = 0;
+    }
+
+    if (state == 1 || state == 3) {
+        if (!g_imu_data_valid) {
+            Motor_Disable();
+            return;
+        }
+
+        float yaw_err = g_yaw_target - g_imu_ypr[0];
+        if (yaw_err > 180.0f) yaw_err -= 360.0f;
+        if (yaw_err < -180.0f) yaw_err += 360.0f;
+        float turn_out = PID_Calc(&g_yaw_pid, yaw_err, 0.0f);
+
+        int16_t left = straight_speed + (int16_t)turn_out;
+        int16_t right = straight_speed - (int16_t)turn_out;
+        Motor_Enable();
+        Motor_SetSpeed(left, right);
+
+        if (black_line_count >= line_confirm_count) {
+            no_line_count = 0;
+            ir_last_err = 0.0f;
+            state = (state == 1) ? 2 : 4;
+            printf("task6: track %d\r\n", (state == 2) ? 1 : 2);
+        }
+    } else if (state == 2 || state == 4) {
+        if (no_line_count >= lost_line_confirm_count) {
+            black_line_count = 0;
+            ir_last_err = 0.0f;
+
+            if (state == 2) {
+                state = 3;
+                printf("task6: gyro straight 2\r\n");
+            } else {
+                Motor_Disable();
+                state = 5;
+                printf("task6 done\r\n");
+            }
+            return;
+        }
+
+        float err = IR_GetError(ir);
+        float correction = IR_PID_Control(err);
+        float diff = 0.8f * correction * fabsf(correction);
+
+        if (diff > max_diff) diff = max_diff;
+        if (diff < -max_diff) diff = -max_diff;
+
+        int16_t left = track_base_speed + (int16_t)diff;
+        int16_t right = track_base_speed - (int16_t)diff;
+
+        if (left > 60) left = 60;
+        if (left < 10) left = 10;
+        if (right > 60) right = 60;
+        if (right < 10) right = 10;
+
+        Motor_SetSpeed(left, right);
+
+        if (++print_div >= 20) {
+            print_div = 0;
+            printf("task6 state:%d err:%f speed:%d,%d\r\n", state, err, left, right);
+        }
+    } else {
+        Motor_Disable();
+    }
+}
+
+
+
+
+
 void task1(void)
 {
     static uint8_t state = 0;               /* 状态机: 0=初始化, 1=运行中, 2=完成 */
@@ -583,7 +706,7 @@ void task1(void)
     float current_yaw = g_imu_ypr[0];
     float yaw_err = Yaw_Error(g_yaw_target,current_yaw);
 
-    turn_out = PID_Calc(&g_yaw_pid, g_yaw_target, g_yaw_target);
+    turn_out = PID_Calc(&g_yaw_pid, g_yaw_target, current_yaw);
 
     
 
