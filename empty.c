@@ -81,7 +81,7 @@ void task8(void);
 
 //==========  全局变量定义区 =============//
 
-//任务1区域：速度闭环控制
+
 PID_t g_speed_pid;         /* 速度闭环PID结构体 */
 PID_t g_yaw_pid;         /* 陀螺仪闭环PID结构体 */
 
@@ -100,6 +100,9 @@ static volatile uint32_t g_imu_sample_seq = 0;
 //==========IMU闭环控制区==========//
 static float g_yaw_target = 0.0f;
 static uint32_t last_Timer_Count = 0;
+
+//============循迹控制区=============//
+static int8_t ir[8];
 
 /* ==================== 主函数 ==================== */
 int main(void)
@@ -444,7 +447,11 @@ void task4(void)
 {
     //初始化任务2，进入直行状态，直到采集到循迹数据
     static uint8_t task2_state = 0;
+    static uint8_t find_state = 0;
     static uint8_t task2_state_straight = 1;//进入直线行驶
+    static float turn_out = 0;
+    static float speed_out = 0;
+    static float speed_target = 50.0f;
 
     if(task2_state == 0){
         Motor_ResetLeftEncoder();
@@ -452,6 +459,7 @@ void task4(void)
         Motor_Enable();
         IMU_init();
         PID_Init(&g_yaw_pid, 0.45f, 0.0f, 0.1f, 100, -30, 30);
+        PID_Init(&g_speed_pid, 1.0f, 0.0f, 0.1f, 100, 10, 60);
         task2_state = 1;
     }
 
@@ -463,11 +471,35 @@ void task4(void)
             
             float current_yaw = g_imu_ypr[0];
             //角度和速度双环
+            turn_out = PID_Calc(&g_yaw_pid, g_yaw_target, current_yaw);
 
+            float current_speed = Motor_SpeedToPWM(Motor_GetLeftEncoderSpeed());
+            speed_out = PID_Calc(&g_speed_pid, speed_target, current_speed);
+            
+            //输出混合
+            float left_out = speed_out + turn_out;
+            float right_out = speed_out - turn_out;
+
+            //输出保护
+            if(left_out  > 60) left_out = 60;
+            if(left_out  < 10) left_out = 10;
+            if(right_out > 60) right_out = 60;
+            if(right_out < 10) right_out = 10;
+
+            //输出
+            Motor_SetPWM(left_out ,right_out);
+
+            //更新状态
+            find_state = IR_GetSensorCount(ir);
+            if(find_state > 0){
+                task2_state_straight = 0;//检测到黑线，退出直线行驶状态
+                return;
+            }
         }   
         
         else{
             //循迹和速度双环
+
         }
     }
 
@@ -583,7 +615,7 @@ void task1(void)
     float current_yaw = g_imu_ypr[0];
     float yaw_err = Yaw_Error(g_yaw_target,current_yaw);
 
-    turn_out = PID_Calc(&g_yaw_pid, g_yaw_target, g_yaw_target);
+    turn_out = PID_Calc(&g_yaw_pid, g_yaw_target, current_yaw);
 
     
 
