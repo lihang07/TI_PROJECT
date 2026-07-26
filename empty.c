@@ -14,6 +14,7 @@
 
 
 #define PI 3.14159
+#define SEARCH_SPEED 10
 //定义任务状态结构体
 typedef enum 
 {
@@ -84,6 +85,7 @@ void task8(void);
 
 PID_t g_speed_pid;         /* 速度闭环PID结构体 */
 PID_t g_yaw_pid;         /* 陀螺仪闭环PID结构体 */
+PID_t g_ir_pid;         /* 循迹闭环PID结构体 */
 
 static volatile uint32_t TIMA0_count = 0;
 
@@ -102,7 +104,7 @@ static float g_yaw_target = 0.0f;
 static uint32_t last_Timer_Count = 0;
 
 //============循迹控制区=============//
-static int8_t ir[8];
+static uint8_t ir[8];
 
 /* ==================== 主函数 ==================== */
 int main(void)
@@ -186,7 +188,7 @@ int main(void)
                 task1();
                 break;
             case(status_task2):
-                task2();
+                task4();
                 break;
             case(status_task3):
                
@@ -198,40 +200,6 @@ int main(void)
 
         }
        
-    //    IR_Read(ir);//读取循迹
-    //    float err = IR_GetError(ir);//计算误差
-    //    printf("Error: %f\r\n", err);
-       
-    //    float correction = IR_PID_Control(err);
-    // float k = 0.8;//差速控制
-    // float diff = k* correction *fabs(correction);
-    
-    // if(diff > 40 )diff = 40;
-    // if(diff < -40)diff = -40;
-    // printf("diff : %f\r\n",diff);
-    // float base = 40 -1 *fabs(err);
-    // if (base <15) base = 15;
-
-    // int right = base -diff;
-    // int left = base +diff;
-    // Motor_SetSpeed(left, right);
-
-    //    printf("Left Speed:  %d pulse/s\r\n", Motor_GetLeftEncoderSpeed());
-    //     printf("Right Speed: %d pulse/s\r\n", Motor_GetRightEncoderSpeed());
-    //    printf("correction : %f\r\n",correction);
-    // delay_ms(100);
-    
-
-
-    // if(IR_GetSensorCount(ir) == 0)
-    // {
-    //     if(Timer_count >2000){
-    //     Motor_Disable();
-    //     break;
-    //     }
-    //     Timer_count =0;
-    // }
-        
 
 
 
@@ -445,13 +413,23 @@ void task3(void)
 
 void task4(void)
 {
+
     //初始化任务2，进入直行状态，直到采集到循迹数据
     static uint8_t task2_state = 0;
     static uint8_t find_state = 0;
     static uint8_t task2_state_straight = 1;//进入直线行驶
-    static float turn_out = 0;
-    static float speed_out = 0;
-    static float speed_target = 50.0f;
+
+    static float    turn_out = 0;
+    static float    speed_out = 0;
+    static float    speed_target = 25.0f;
+    static int32_t  leftencoder_start_pos = 0;
+    static int32_t  rightencoder_start_pos = 0;
+    static uint8_t  print_div = 0;
+    static float    imu_target_pos = 0.0f;
+    static float    current_yaw;
+    static uint8_t  lost_line_count = 0;
+    static float    position = 0;
+    static float    wheelturn_angle = 0;
 
     if(task2_state == 0){
         Motor_ResetLeftEncoder();
@@ -459,17 +437,20 @@ void task4(void)
         Motor_Enable();
         IMU_init();
         PID_Init(&g_yaw_pid, 0.45f, 0.0f, 0.1f, 100, -30, 30);
-        PID_Init(&g_speed_pid, 1.0f, 0.0f, 0.1f, 100, 10, 60);
+        PID_Init(&g_speed_pid, 3.0f, 0.2f, 1.2f, 100, 10, 60);
+        PID_Init(&g_ir_pid, 0.6f, 0.0f, 0.14f, 100, -20, 20);
+        imu_target_pos = g_imu_ypr[0];
         task2_state = 1;
     }
 
     if(task2_state){
+        IR_Read(ir);//读取循迹传感器数据
         if(task2_state_straight){
-            g_yaw_target = g_imu_ypr[0];//获取当前陀螺仪数值作为目标进行直线闭环
+            g_yaw_target = imu_target_pos;//获取当前陀螺仪数值作为目标进行直线闭环
             
             if(!g_imu_data_valid)return;
             
-            float current_yaw = g_imu_ypr[0];
+            current_yaw = g_imu_ypr[0];
             //角度和速度双环
             turn_out = PID_Calc(&g_yaw_pid, g_yaw_target, current_yaw);
 
@@ -477,31 +458,191 @@ void task4(void)
             speed_out = PID_Calc(&g_speed_pid, speed_target, current_speed);
             
             //输出混合
-            float left_out = speed_out + turn_out;
-            float right_out = speed_out - turn_out;
+            float left_out = speed_out - turn_out;
+            float right_out = speed_out + turn_out;
 
             //输出保护
-            if(left_out  > 60) left_out = 60;
+            if(left_out  > 40) left_out = 40;
             if(left_out  < 10) left_out = 10;
-            if(right_out > 60) right_out = 60;
+            if(right_out > 40) right_out = 40;
             if(right_out < 10) right_out = 10;
 
             //输出
-            Motor_SetPWM(left_out ,right_out);
+            Motor_SetSpeed(left_out ,right_out);
+
+            if(Timer_count >last_Timer_Count )
+            {
+                last_Timer_Count = Timer_count;
+                print_div++;
+            }
+
+            //数据输出
+            if (print_div >= 10) {
+                print_div = 0;
+                
+                //输出调试
+                printf("out:%f,%f,%f,%f,%f,%f,%f\r\n",speed_target,turn_out,left_out,right_out,speed_out,current_speed);
+
+                //
+                OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
+                OLED_ShowFloat(25, 0, current_yaw, 3, 2, 16);
+                OLED_ShowFloat(25,20, Motor_GetLeftEncoderPosition(), 6, 0, 16);
+                OLED_Refresh();
+            }
 
             //更新状态
             find_state = IR_GetSensorCount(ir);
             if(find_state > 0){
                 task2_state_straight = 0;//检测到黑线，退出直线行驶状态
+                leftencoder_start_pos = Motor_GetLeftEncoderPosition();
+                rightencoder_start_pos = Motor_GetRightEncoderPosition();
+
                 return;
             }
         }   
         
         else{
             //循迹和速度双环
+            position = IR_GetPosition(ir);
+            float speed_diff = (-position) * 3;
+            
+            // float left_out  = speed_target - speed_diff;
+            // float right_out = speed_target + speed_diff;
 
+
+            // float err = IR_GetError(ir);//计算误差
+            // float ir_target = 0.0f;
+            // static float wheelturn_angle = 0;
+
+            // turn_out = PID_Calc(&g_ir_pid, ir_target, err);
+
+            float current_speed =  (Motor_SpeedToPWM(Motor_GetLeftEncoderSpeed())
+                                   +Motor_SpeedToPWM(Motor_GetRightEncoderSpeed())) / 2.0f;
+
+            speed_out = PID_Calc(&g_speed_pid, speed_target, current_speed);
+            //speed_out = speed_target;
+            //输出混合
+            //float turn_real_out = turn_out ;//0.8 * turn_out * fabs(turn_out);
+            float left_out = speed_out - speed_diff;//turn_real_out;
+            float right_out = speed_out + speed_diff;//turn_real_out;
+
+            //输出保护
+            if(left_out  > 40) left_out = 40;
+            if(left_out  < 10) left_out = 10;
+            if(right_out > 40) right_out = 40;
+            if(right_out < 10) right_out = 10;
+
+            //输出
+            Motor_SetSpeed(left_out ,right_out);
+
+            // //更新状态
+            
+
+
+            //丢线处理及出弯判断
+            if(IR_IsLineLost(ir)) {
+                if(Timer_count >last_Timer_Count )
+                {
+                    last_Timer_Count = Timer_count;
+                    lost_line_count++;
+                    print_div++;
+                }
+                float leftencoder_pos = Motor_GetLeftEncoderPosition();
+                float rightencoder_pos = Motor_GetRightEncoderPosition();
+                float current_trick_c = ((rightencoder_pos - rightencoder_start_pos) -
+                                     (leftencoder_pos - leftencoder_start_pos))/(2 * 340);//编码器差值获取行驶距离
+                wheelturn_angle = (current_trick_c / 109.6f) * 180.0f;//当前已行驶距离和循迹线长比较
+                    
+                    //丢线处理
+                    if (lost_line_count < 15){
+                        if (position < 0){
+                            Motor_SetSpeed(-SEARCH_SPEED,SEARCH_SPEED);
+                        }else{
+                            Motor_SetSpeed(SEARCH_SPEED,-SEARCH_SPEED);
+                        }
+                    }else{
+                        lost_line_count = 0;
+                        task2_state_straight = 1;//检测不到黑线，退出直线行驶状态
+                        leftencoder_start_pos = 0;
+                        rightencoder_start_pos = 0;
+                        
+                        imu_target_pos = 180.0f - wheelturn_angle;
+                        return;
+                    }
+
+                
+                
+                //数据输出
+                if (print_div >= 10) {
+                    print_div = 0;
+                    
+                    //输出调试
+                    //printf("out:%f,%f,%f,%f,%f,%f\r\n",speed_target,turn_out,left_out,right_out,speed_out,current_speed);
+
+                    //
+                    OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
+                    OLED_ShowFloat(25, 0, current_yaw, 3, 2, 16);
+                    OLED_ShowFloat(25,20, Motor_GetLeftEncoderPosition(), 6, 0, 16);
+                    OLED_Refresh();
+                }
+               
+                // find_state = IR_GetSensorCount(ir);
+                // if(find_state == 0){
+                //     lost_line_count++;
+                // }else{
+                //     lost_line_count = 0;
+                // }
+                // if(lost_line_count > 5){
+                //     task2_state_straight = 1;//检测不到黑线，退出弯道行驶状态
+                //     leftencoder_start_pos = 0;
+                //     rightencoder_start_pos = 0;
+                //     //imu_target_pos = 180.0f - wheelturn_angle;
+                //     return;
+                //}
+
+            }
+            
+            
+
+            
         }
+            
+
     }
+    //    
+    //    
+    //    printf("Error: %f\r\n", err);
+       
+    //    float correction = IR_PID_Control(err);
+    // float k = 0.8;//差速控制
+    // float diff = k* correction *fabs(correction);
+    
+    // if(diff > 40 )diff = 40;
+    // if(diff < -40)diff = -40;
+    // printf("diff : %f\r\n",diff);
+    // float base = 40 -1 *fabs(err);
+    // if (base <15) base = 15;
+
+    // int right = base -diff;
+    // int left = base +diff;
+    // Motor_SetSpeed(left, right);
+
+    //    printf("Left Speed:  %d pulse/s\r\n", Motor_GetLeftEncoderSpeed());
+    //     printf("Right Speed: %d pulse/s\r\n", Motor_GetRightEncoderSpeed());
+    //    printf("correction : %f\r\n",correction);
+    // delay_ms(100);
+    
+
+
+    // if(IR_GetSensorCount(ir) == 0)
+    // {
+    //     if(Timer_count >2000){
+    //     Motor_Disable();
+    //     break;
+    //     }
+    //     Timer_count =0;
+    // }
+        
 
 
 }
