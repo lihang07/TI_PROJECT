@@ -192,7 +192,7 @@ int main(void)
                 break;
             case(status_task3):
                
-                task3();
+                task7();
                 break;
             case(status_task4):
                 task5();
@@ -446,7 +446,7 @@ void task4(void)
     if(task2_state){
         IR_Read(ir);//读取循迹传感器数据
         if(task2_state_straight){
-            g_yaw_target = imu_target_pos;//获取当前陀螺仪数值作为目标进行直线闭环
+            g_yaw_target = -imu_target_pos;//获取当前陀螺仪数值作为目标进行直线闭环
             
             if(!g_imu_data_valid)return;
             
@@ -483,10 +483,12 @@ void task4(void)
                 //输出调试
                 printf("out:%f,%f,%f,%f,%f,%f,%f\r\n",speed_target,turn_out,left_out,right_out,speed_out,current_speed);
 
-                //
+                OLED_Clear();
+                OLED_ShowString(0,40, (uint8_t *)"state:straight", 16);
+                OLED_ShowFloat(50,20,g_yaw_target,3,2,16);
                 OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
                 OLED_ShowFloat(25, 0, current_yaw, 3, 2, 16);
-                OLED_ShowFloat(25,20, Motor_GetLeftEncoderPosition(), 6, 0, 16);
+                OLED_ShowFloat(0,20, Motor_GetLeftEncoderPosition(), 6, 0, 16);
                 OLED_Refresh();
             }
 
@@ -502,9 +504,10 @@ void task4(void)
         }   
         
         else{
+            current_yaw = g_imu_ypr[0];
             //循迹和速度双环
             position = IR_GetPosition(ir);
-            float speed_diff = (-position) * 3;
+            float speed_diff = (-position) * 4;
             
             // float left_out  = speed_target - speed_diff;
             // float right_out = speed_target + speed_diff;
@@ -536,7 +539,11 @@ void task4(void)
             Motor_SetSpeed(left_out ,right_out);
 
             // //更新状态
-            
+            float leftencoder_pos = Motor_GetLeftEncoderPosition();
+            float rightencoder_pos = Motor_GetRightEncoderPosition();
+            float current_trick_c = ((rightencoder_pos - rightencoder_start_pos) -
+                                     (leftencoder_pos - leftencoder_start_pos))/(2 * 340);//编码器差值获取行驶距离
+            wheelturn_angle = (current_trick_c / 109.6f) * 180.0f;//当前已行驶距离和循迹线长比较
 
 
             //丢线处理及出弯判断
@@ -547,14 +554,10 @@ void task4(void)
                     lost_line_count++;
                     print_div++;
                 }
-                float leftencoder_pos = Motor_GetLeftEncoderPosition();
-                float rightencoder_pos = Motor_GetRightEncoderPosition();
-                float current_trick_c = ((rightencoder_pos - rightencoder_start_pos) -
-                                     (leftencoder_pos - leftencoder_start_pos))/(2 * 340);//编码器差值获取行驶距离
-                wheelturn_angle = (current_trick_c / 109.6f) * 180.0f;//当前已行驶距离和循迹线长比较
+
                     
                     //丢线处理
-                    if (lost_line_count < 15){
+                    if (lost_line_count < 10){
                         if (position < 0){
                             Motor_SetSpeed(-SEARCH_SPEED,SEARCH_SPEED);
                         }else{
@@ -573,13 +576,13 @@ void task4(void)
                 
                 
                 //数据输出
-                if (print_div >= 10) {
+                if (print_div >= 5) {
                     print_div = 0;
                     
                     //输出调试
                     //printf("out:%f,%f,%f,%f,%f,%f\r\n",speed_target,turn_out,left_out,right_out,speed_out,current_speed);
 
-                    //
+                    OLED_Clear();
                     OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
                     OLED_ShowFloat(25, 0, current_yaw, 3, 2, 16);
                     OLED_ShowFloat(25,20, Motor_GetLeftEncoderPosition(), 6, 0, 16);
@@ -678,11 +681,12 @@ void task5(void)
 
     float current_yaw = g_imu_ypr[0];
     float err = Yaw_Error(g_yaw_target,current_yaw);
+    printf("yaw : %f\r\n",current_yaw);
 
     turn_out = PID_Calc(&g_yaw_pid, err, 0.0f);
 
-    int16_t left_ctrl  = base_speed + (int16_t)turn_out;
-    int16_t right_ctrl = base_speed - (int16_t)turn_out;
+    int16_t left_ctrl  = base_speed - (int16_t)turn_out;
+    int16_t right_ctrl = base_speed + (int16_t)turn_out;
 
     if (left_ctrl > 20) left_ctrl = 20;
     if (left_ctrl < -20) left_ctrl = -20;
@@ -755,8 +759,9 @@ void task1(void)
 
     float current_yaw = g_imu_ypr[0];
     float yaw_err = Yaw_Error(g_yaw_target,current_yaw);
+    printf("yaw : %f\r\n",current_yaw);
 
-    turn_out = PID_Calc(&g_yaw_pid, g_yaw_target, current_yaw);
+    turn_out = PID_Calc(&g_yaw_pid, yaw_err, 0.0f);
 
     
 
@@ -800,4 +805,82 @@ void task1(void)
     }
 
     
+}
+
+void task7(void)
+{
+    //角度环PID控制
+    static uint8_t task1_state = 0;
+    const float target_dist   = 100.0f;
+    static int16_t base_speed = 25;
+    static float turn_out = 0;
+    static uint8_t print_div = 0;
+     static float speed_out = 0.0f;
+    const float wheel_c       = PI * 6.5f;
+    const float pulse_per_cm  = (ENCODER_PPR * 28.0f) / wheel_c;
+
+
+    //初始化
+    if(task1_state == 0){
+        Motor_ResetLeftEncoder();
+        Motor_ResetRightEncoder();
+        Motor_Enable();
+        IMU_init();
+
+        if(g_imu_data_valid){//如果已经初始化陀螺仪，则闭环目标为当前角度
+            g_yaw_target = g_imu_ypr[0];
+        } else {
+            g_yaw_target = 0.0f;
+        }
+        PID_Init(&g_speed_pid, 0.45f, 0.1f, 0.01f, 50, 5, 60);//初始化速度环PID
+        PID_Init(&g_yaw_pid, 0.45f, 0.0f, 0.1f, 100, -30, 30);
+        task1_state = 1;
+    }
+
+    if(!g_imu_data_valid)return;
+
+    float current_yaw = g_imu_ypr[0];
+    float err = Yaw_Error(g_yaw_target,current_yaw);
+
+
+    turn_out = PID_Calc(&g_yaw_pid, err, 0.0f);
+
+
+    float current_position = Motor_GetLeftEncoderPosition() / pulse_per_cm;
+    speed_out = PID_Calc(&g_speed_pid, target_dist, current_position);
+
+    int16_t left_ctrl  = speed_out - (int16_t)turn_out;
+    int16_t right_ctrl = speed_out + (int16_t)turn_out;
+
+    if (left_ctrl > 20) left_ctrl = 20;
+    if (left_ctrl < -20) left_ctrl = -20;
+    if (right_ctrl > 20) right_ctrl = 20;
+    if (right_ctrl < -20) right_ctrl = -20;
+
+    Motor_SetSpeed(left_ctrl, right_ctrl);
+    
+    if(Timer_count >last_Timer_Count )
+    {
+        last_Timer_Count = Timer_count;
+        print_div++;
+    }
+
+    //数据输出
+    if (print_div >= 20) {
+        print_div = 0;
+        
+        //输出调试
+        printf("out:%f,%f,%d,%d,%f\r\n",g_yaw_target,current_yaw,left_ctrl,right_ctrl,turn_out);
+
+        //
+        OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
+        OLED_ShowFloat(25, 0, current_yaw, 3, 2, 16);
+        OLED_Refresh();
+    }
+
+    
+    if(current_position >= 100.0f)Motor_Disable();
+
+  
+
 }
