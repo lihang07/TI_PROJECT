@@ -243,8 +243,8 @@ static void AHRSupdate(float gx,float gy,float gz,float ax,float ay,float az,
     float halfDt = 0.5f * dt_seconds;
 
     /* 预计算四元数分量乘积(用于后续计算) */
-    float q0q0=q0*q0,q0q1=q0*q1,q0q2=q0*q2,q0q3=q0*q3;
-    float q1q1=q1*q1,q1q2=q1*q2,q1q3=q1*q3;
+    float q0q0=q0*q0,q0q1=q0*q1,q0q2=q0*q2;
+    float q1q1=q1*q1,q1q3=q1*q3;
     float q2q2=q2*q2,q2q3=q2*q3,q3q3=q3*q3;
 
     /* 规范化加速度计向量(转换为单位向量)

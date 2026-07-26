@@ -25,12 +25,6 @@ static uint8_t gCurrentBank = 0xFF;
  * 内部辅助函数
  * ============================================ */
 
-/* delayUs: 微秒级延时
- * 参数: us - 延时微秒数
- * 通过CPU时钟周期计算实现精确延时 */
-static void delayUs(uint32_t us)
-{ delay_cycles((CPUCLK_FREQ/1000000UL)*us); }
-
 /* delayMs: 毫秒级延时
  * 参数: ms - 延时毫秒数 */
 static void delayMs(uint32_t ms)
