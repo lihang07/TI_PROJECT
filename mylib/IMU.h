@@ -30,21 +30,16 @@ void IMU_init(void);
  * 参数: ypr - 输出数组[yaw, pitch, roll] 单位:度(°)
  * 说明: 基于AHRS算法融合加速度计和陀螺仪数据
  *       使用四元数表示姿态,通过欧拉角转换得到最终角度 */
-int8_t IMU_getYawPitchRoll(float *ypr, float dt_seconds);
+void IMU_getYawPitchRoll(float *ypr);
 
 /* IMU_TT_getgyro: 获取原始陀螺仪数据
  * 参数: zsjganda - 输出数组[ax,ay,az,gx,gy,gz,0]
  * 说明: 直接获取传感器原始数据,用于调试或外部滤波 */
 void IMU_TT_getgyro(float *zsjganda);
 
-/* Return the most recent gyro sample after stationary bias compensation. */
-void IMU_GetCorrectedGyro(float *gyro);
-
 /* MPU6050_InitAng_Offset: 传感器零偏初始化(兼容MPU6050接口)
  * 说明: 本项目中未使用,仅保持接口兼容性 */
 void MPU6050_InitAng_Offset(void);
 
-//imu角度转换
  float Yaw_Error(float target, float current);
-
 #endif /* __IMU_H__ */

@@ -202,9 +202,10 @@ SYSTICK.period            = 31999;
 TIMER1.$name              = "TIMER_0";
 TIMER1.timerClkDiv        = 8;
 TIMER1.timerClkPrescale   = 100;
-TIMER1.timerMode          = "PERIODIC_UP";
 TIMER1.timerStartTimer    = true;
-TIMER1.timerPeriod        = "5ms";
+TIMER1.interrupts         = ["ZERO"];
+TIMER1.timerMode          = "PERIODIC";
+TIMER1.timerPeriod        = "20ms";
 TIMER1.peripheral.$assign = "TIMG0";
 
 TIMER2.$name              = "TIMER_GB";
