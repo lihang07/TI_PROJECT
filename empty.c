@@ -271,17 +271,12 @@ void task3(void)
     float yaw = g_imu_ypr[0];
     float pitch = g_imu_ypr[1];
     float roll = g_imu_ypr[2];
-    float gz = g_imu_gyro[2];  /* z轴角速度，度/秒 */
 
-    /* 累计yaw角度（积分） */
-    static float yaw_total = 0;
     static float gyro_total_x = 0.0f;
     static float gyro_total_y = 0.0f;
     static float gyro_total_z = 0.0f;
     static uint8_t print_div = 0;
     static uint32_t last_sample_seq = 0;
-    static float last_yaw = 0.0f;
-    static uint8_t yaw_initialized = 0;
     if (g_imu_sample_seq == last_sample_seq) {
         return;
     }
@@ -290,17 +285,6 @@ void task3(void)
     gyro_total_x += g_imu_gyro[0] * g_imu_dt;
     gyro_total_y += g_imu_gyro[1] * g_imu_dt;
     gyro_total_z += g_imu_gyro[2] * g_imu_dt;
-
-    if (!yaw_initialized) {
-        last_yaw = yaw;
-        yaw_initialized = 1;
-    } else {
-        float yaw_delta = yaw - last_yaw;
-        if (yaw_delta > 180.0f) yaw_delta -= 360.0f;
-        if (yaw_delta < -180.0f) yaw_delta += 360.0f;
-        yaw_total += yaw_delta;
-        last_yaw = yaw;
-    }
 
     /* 每40次（200ms）打印和更新OLED一次 */
     if (++print_div >= 20) {
@@ -542,19 +526,24 @@ void task6(void)
     static uint8_t print_div = 0;                       /* 调试打印分频计数器 */
     static uint8_t curve_slow_flag = 0;                 /* 弯道末期降速标志 */
     static uint16_t turn_hold_count = 0;                /* 丢线后继续转弯的计数器 */
-    static int16_t last_track_left = 28;                /* 丢线前最后一次循迹左轮速度 */
-    static int16_t last_track_right = 28;               /* 丢线前最后一次循迹右轮速度 */
+    static uint8_t turn_speed_avg_ready = 0;            /* 弯道末段速度平均值是否已经有效 */
+    static float turn_speed_avg_left = 28.0f;           /* 弯道末段左轮速度的指数平均值 */
+    static float turn_speed_avg_right = 28.0f;          /* 弯道末段右轮速度的指数平均值 */
+    static int16_t last_track_left = 28;                /* 丢线后补转所用的左轮平均速度 */
+    static int16_t last_track_right = 28;               /* 丢线后补转所用的右轮平均速度 */
 
     const float wheel_c = PI * 6.5f;                    /* 轮子周长，单位cm */
     const float pulse_per_cm = (ENCODER_PPR * 28.0f) / wheel_c; /* 每厘米对应的编码器脉冲数 */
     const float wheel_base = 16.5f;                     /* 两个轮胎中心之间的距离，单位cm */
     const float target_dist = 100.0f;                   /* 直线段参考距离，单位cm */
     const int16_t straight_speed = 28;                  /* 陀螺仪直线行驶时的基础速度 */
-    const int16_t track_base_speed = straight_speed;    /* 循迹基础速度与直线速度保持一致，进入循迹时不主动减速 */
-    const int16_t track_slow_speed = 20;                /* 弯道末期的循迹低速 */
+    const int16_t track_base_speed = 36;                /* 循迹基础速度提高为原来的两倍 */
+    const int16_t track_slow_speed = 24;                /* 弯道末期循迹低速提高为原来的两倍 */
     const int16_t max_diff = 35;                        /* 循迹时左右轮最大差速限制 */
     const float curve_slow_angle = 150.0f;              /* 估算转角超过该角度后，认为接近出弯并开始降速 */
-    const uint16_t turn_hold_ticks = 100;               /* 丢线后继续转弯约0.5s，定时器周期约5ms */
+    const float turn_avg_start_angle = 120.0f;          /* 转角达到120度后才开始统计出弯前的平均速度 */
+    const float turn_speed_avg_alpha = 0.25f;           /* 指数平均系数，数值越大越重视最近的末段速度 */
+    const uint16_t turn_hold_ticks = 99;                /* 丢线后继续转弯约0.24s，原延时缩短为二分之一 */
     const uint8_t line_confirm_count = 3;               /* 连续检测到黑线达到该次数后，才确认找到黑线 */
     const uint8_t lost_line_confirm_count = 5;          /* 连续丢失黑线达到该次数后，才确认离开黑线 */
 
@@ -564,6 +553,9 @@ void task6(void)
         no_line_count = 0;                              /* 清零丢线确认计数 */
         curve_slow_flag = 0;                            /* 清零弯道末期降速标志 */
         turn_hold_count = 0;                            /* 清零出弯补转计数器 */
+        turn_speed_avg_ready = 0;                       /* 清除弯道末段速度平均有效标志 */
+        turn_speed_avg_left = straight_speed;           /* 复位弯道末段左轮平均速度 */
+        turn_speed_avg_right = straight_speed;          /* 复位弯道末段右轮平均速度 */
         last_track_left = straight_speed;               /* 复位丢线前左轮速度记录 */
         last_track_right = straight_speed;              /* 复位丢线前右轮速度记录 */
         ir_last_err = 0.0f;                             /* 清零循迹PID的上一次误差 */
@@ -578,6 +570,9 @@ void task6(void)
         no_line_count = 0;                              /* 初始化时默认还没有确认丢线 */
         curve_slow_flag = 0;                            /* 初始化时不启用弯道降速 */
         turn_hold_count = 0;                            /* 初始化出弯补转计数器 */
+        turn_speed_avg_ready = 0;                       /* 初始化弯道末段速度平均有效标志 */
+        turn_speed_avg_left = straight_speed;           /* 初始化弯道末段左轮平均速度 */
+        turn_speed_avg_right = straight_speed;          /* 初始化弯道末段右轮平均速度 */
         last_track_left = straight_speed;               /* 初始化丢线前左轮速度记录 */
         last_track_right = straight_speed;              /* 初始化丢线前右轮速度记录 */
         ir_last_err = 0.0f;                             /* 清除循迹PID历史误差 */
@@ -637,6 +632,9 @@ void task6(void)
             no_line_count = 0;                           /* 切换前清零丢线计数 */
             ir_last_err = 0.0f;                          /* 切换前清零循迹PID历史误差 */
             curve_slow_flag = 0;                         /* 进入新弯道前清零弯道降速标志 */
+            turn_speed_avg_ready = 0;                    /* 进入新弯道前清除末段速度平均有效标志 */
+            turn_speed_avg_left = straight_speed;        /* 进入新弯道前复位左轮平均速度 */
+            turn_speed_avg_right = straight_speed;       /* 进入新弯道前复位右轮平均速度 */
             Motor_ResetLeftEncoder();                    /* 进入循迹弯道时清零左轮编码器，用于估算转过角度 */
             Motor_ResetRightEncoder();                   /* 进入循迹弯道时清零右轮编码器，用于估算转过角度 */
             state = (state == 1) ? 2 : 4;                /* 第一次直行后进入第一次循迹，第二次直行后进入第二次循迹 */
@@ -647,6 +645,10 @@ void task6(void)
             black_line_count = 0;                        /* 清零黑线确认计数 */
             ir_last_err = 0.0f;                          /* 清零循迹PID历史误差 */
             turn_hold_count = 0;                         /* 准备开始出弯补转计时 */
+            if (turn_speed_avg_ready) {                  /* 如果已经采集到弯道末段的平均速度 */
+                last_track_left = (int16_t)turn_speed_avg_left; /* 使用左轮末段平均速度进行补转 */
+                last_track_right = (int16_t)turn_speed_avg_right; /* 使用右轮末段平均速度进行补转 */
+            }                                           /* 末段平均速度切换完成 */
 
             if (state == 2) {                            /* 如果结束的是第一段循迹 */
                 state = 6;                               /* 进入第一次出弯补转状态 */
@@ -682,8 +684,18 @@ void task6(void)
         if (right < 10) right = 10;                      /* 右轮速度下限保护 */
 
         Motor_SetSpeed(left, right);                     /* 输出循迹时的左右轮速度 */
-        last_track_left = left;                          /* 记录当前循迹左轮速度，供丢线后继续转弯使用 */
-        last_track_right = right;                        /* 记录当前循迹右轮速度，供丢线后继续转弯使用 */
+        if (curve_angle >= turn_avg_start_angle) {       /* 只采集出弯前一段的速度，避开入弯速度误差 */
+            if (!turn_speed_avg_ready) {                 /* 第一次采集末段速度时 */
+                turn_speed_avg_left = left;              /* 用当前左轮速度初始化平均值 */
+                turn_speed_avg_right = right;            /* 用当前右轮速度初始化平均值 */
+                turn_speed_avg_ready = 1;                /* 标记末段平均速度已经有效 */
+            } else {                                     /* 后续末段速度采样时 */
+                turn_speed_avg_left = turn_speed_avg_left * (1.0f - turn_speed_avg_alpha) + left * turn_speed_avg_alpha; /* 更新左轮末段指数平均速度 */
+                turn_speed_avg_right = turn_speed_avg_right * (1.0f - turn_speed_avg_alpha) + right * turn_speed_avg_alpha; /* 更新右轮末段指数平均速度 */
+            }                                            /* 末段速度平均更新完成 */
+            last_track_left = (int16_t)turn_speed_avg_left; /* 同步保存左轮补转平均速度 */
+            last_track_right = (int16_t)turn_speed_avg_right; /* 同步保存右轮补转平均速度 */
+        }                                                /* 出弯前速度采集判断结束 */
 
         if (++print_div >= 20) {                         /* 每20个控制周期打印一次调试信息 */
             print_div = 0;                               /* 清零打印分频计数器 */
@@ -691,7 +703,7 @@ void task6(void)
         }                                               /* 调试打印处理结束 */
     } else if (state == 6 || state == 7) {               /* 状态6或7：循迹丢线后继续按原来的转弯趋势补转 */
         Motor_Enable();                                  /* 保持电机使能 */
-        Motor_SetSpeed(last_track_left, last_track_right); /* 沿用丢线前最后一次循迹速度继续转弯 */
+        Motor_SetSpeed(last_track_left, last_track_right); /* 使用出弯前末段平均速度继续转弯 */
         turn_hold_count++;                               /* 出弯补转计数加1 */
 
         if (turn_hold_count >= turn_hold_ticks) {        /* 补转时间达到约0.5s后 */
