@@ -365,9 +365,11 @@ void task4(void)
     const float pulse_per_cm  = (ENCODER_PPR * 28.0f) / WHEEL_C;
     const float target_dist1   = 138.0f;     /* 目标距离(cm) */
     static const float ir_target = 0.0f;      //IR目标值
-
-    
-    
+    static int16_t position = 0;              //当前位置
+    static uint16_t search_speed = 10;       //搜索速度
+    static int16_t speed_diff = 0;
+    static uint8_t first_track = 1;
+    static float position_filtered = 0.0f;
     
 
     if(task3_state == 0){
@@ -385,7 +387,7 @@ void task4(void)
         turn_out = 0.0f;
         if(g_imu_data_valid){//如果已经初始化陀螺仪，则闭环目标为当前角度
             g_yaw_target = g_imu_ypr[0];
-            printf("g_yaw_target:%f\r\n",g_imu_ypr[0]);
+            
             } else {
                 g_yaw_target = 0.0f;
         }
@@ -395,10 +397,10 @@ void task4(void)
    
     if(task3_state == 1){
         /* 循迹控制固定在10ms执行一次，避免主循环速度变化影响控制效果 */
-        if (Timer_count == task4_last_control_tick) {
+        if (TIMA0_count <= 2) {
             return;
         }
-        task4_last_control_tick = Timer_count;
+        TIMA0_count = 0;
 
         //执行任务
         /*状态1：直线行驶，有循迹信号时切换状态；
@@ -409,8 +411,9 @@ void task4(void)
           状态6：姿态调整*/
 
 
-        IR_Read(ir);
+        
         if(task3_runing_state == 0){
+            IR_Read(ir);
             //状态1：直线行驶，有循迹信号时切换状态
             current_yaw = g_imu_ypr[0];
             float err = Yaw_Error(g_yaw_target,current_yaw);
@@ -467,173 +470,140 @@ void task4(void)
         }
         else if(task3_runing_state == 1){
             //状态2：循迹行驶，连续无循迹信号时切换状态
-            
+            Motor_Enable();
             IR_Read(ir);
-
-            //========== 丢线保护 ==========//
-            if(IR_GetSensorCount(ir) == 0){         //无循迹信号，开始丢线计数
+            
+            if(first_track){
+                position = IR_GetPosition(ir);
+                position_filtered = position;
+                first_track = 0;
+            }
+            else{
+                position = IR_GetPosition(ir);
                 
-                if(ir_lose_count == 0)turn_end_yaw = g_imu_ypr[0];        //记录丢线时角度
+            }
+            //position_filtered = 0.6 * position + 0.4 * position_filtered;
+            speed_diff = (-position/*_filtered*/) * 3.5f;
+
+            speed_left = speed_target - speed_diff;
+            speed_right = speed_target + speed_diff;
+           
+            if(speed_left > 70)speed_left = 70;
+            if(speed_left < -70)speed_left = -70;
+            if(speed_right > 70)speed_right = 70;
+            if(speed_right < -70)speed_right = -70;
+
+            //处理丢线
+            if(IR_IsLineLost(ir)){
+                if(ir_lose_count == 0) turn_end_yaw = g_imu_ypr[0];
                 ir_lose_count++;
-                if(ir_lose_count > 50){//连续丢线超时，切换至姿态调整状态
+                if(ir_lose_count < 10){
+                    if(position < 0){
+                        Motor_SetSpeed(-search_speed, search_speed);
+                    }else{
+                        Motor_SetSpeed(search_speed, -search_speed);
+                    }
+                }else {
                     ir_lose_count = 0;
+                    Motor_Disable();
+                    float turn_yaw = turn_end_yaw - turn_start_yaw;
+                    g_yaw_target = turn_yaw + 30.0f;
                     task3_runing_state = 2;
                     return;
                 }
-                /* 短暂丢线时按最近一次偏差减速搜索，避免保持旧速度冲出轨道 */
-                speed_left = 10.0f;
-                speed_right = 10.0f;
-                if (ir_last_valid_err > 0.0f) {
-                    speed_left = 10.0f;
-                    speed_right = 14.0f;
-                } else if (ir_last_valid_err < 0.0f) {
-                    speed_left = 14.0f;
-                    speed_right = 10.0f;
-                }
-                Motor_SetSpeed(speed_left, speed_right);
-                return;
-            } else {
-                ir_lose_count = 0;//有信号，清零丢线计数器
+
+            }else {
+                ir_lose_count = 0;
+                Motor_SetSpeed(speed_left,speed_right);
             }
-
-            //进入循迹
-            float ir_err = IR_GetError(ir);
-            
-            //低通滤波：把传感器台阶信号磨平成平滑曲线
-            ir_err_filtered = ir_err_filtered * 0.7f + ir_err * 0.3f;
-            ir_last_valid_err = ir_err;
-
-            /* 使用小差速并限制变化速度，避免曲线中车身被甩出轨道 */
-            float turn_target = ir_err_filtered * 3.2f;
-            turn_out = -(turn_out * 0.35f + turn_target * 0.65f);
-
-
-            speed_target = 25.0f;
-
-            speed_left = speed_target - turn_out;
-            speed_right = speed_target + turn_out;
-
-            if(speed_left > 70)speed_left = 70;
-            if(speed_left < 10)speed_left = 10;
-            if(speed_right > 70)speed_right = 70;
-            if(speed_right < 10)speed_right = 10;
-
-
-            Motor_SetSpeed(speed_left,speed_right);
-
-
         }
         else if(task3_runing_state == 2){
-            //计算转向角度
-            float turn_yaw = 30.0f + Yaw_Error( turn_start_yaw, turn_end_yaw );
+            //状态3：姿态调整，有循迹信号时切换状态
             current_yaw = g_imu_ypr[0];
-            turn_out = PID_Calc(&g_yaw_pid , turn_yaw, current_yaw);
+            float yaw_err = Yaw_Error(g_yaw_target,current_yaw);
+            turn_out = PID_Calc(&g_yaw_pid, yaw_err, 0.0f);
+            Motor_SetSpeed(-turn_out , turn_out);
+            if(yaw_err < 5.0f){
+                task3_runing_state = 0;
+            }
 
-            float turn_real_out = turn_out + 5.0f;
-            Motor_SetSpeed(-turn_real_out ,turn_real_out );
-
-
-            if(turn_out < 3.0f)task3_runing_state = 1;
         }
+            
 
     }
 //=================调试==================//
-    print_div++;
+    if(Timer_count >last_Timer_Count )
+    {
+        last_Timer_Count = Timer_count;
+        print_div++;
+    }
 
     //数据输出
-    if (print_div >= 20) {
-        print_div = 0;
+    // if (print_div >= 20) {
+    //     print_div = 0;
         
-        //输出调试
-        printf("out:%f,%f,%f,%f,%f\r\n",g_yaw_target,current_yaw,speed_left,speed_right,turn_out);
+    //     //输出调试
+    //     printf("out:%f,%f,%f,%f,%d\r\n",position,speed_left,speed_right,turn_out,speed_diff);
 
-        //
-        OLED_ShowString(0, 0, (uint8_t *)"left:", 16);
-        OLED_ShowFloat(25, 0, speed_left, 3, 2, 16);
-        OLED_ShowString(0, 16, (uint8_t *)"right:", 16);
-        OLED_ShowFloat(25, 16, speed_right, 3, 2, 16);
-        OLED_Refresh();
-    }
+    //     //
+    //     OLED_ShowString(0, 0, (uint8_t *)"left:", 16);
+    //     OLED_ShowFloat(25, 0, speed_left, 3, 2, 16);
+    //     OLED_ShowString(0, 16, (uint8_t *)"right:", 16);
+    //     OLED_ShowFloat(25, 16, speed_right, 3, 2, 16);
+    //     OLED_Refresh();
+    // }
 
 
 }
 
 void task8(void)
 {
-    // static int8_t ir_lose_count = 0;
-    // static float turn_end_yaw = 0.0f;
-     static float speed_left = 0.0f;
-     static float speed_right = 0.0f;
-    // static float ir_last_valid_err = 0.0f;      //最近一次有效循迹误差
-     static float speed_target = 0.0f;
-     static float turn_out = 0.0f;
-    // static float ir_err_filtered = 0.0f;
-     static uint8_t print_div = 0;
-    // Motor_Enable();
+    int16_t  position;       /* 黑线位置（-7 ~ +7） */
+    int16_t  speed_diff;     /* 左右轮速度差 */
+    int16_t  left_speed;     /* 左轮计算速度 */
+    int16_t  right_speed;    /* 右轮计算速度 */
+    uint8_t  lost_count = 0;     /* 连续丢线计数 */
+    static uint32_t task4_last_control_tick = 0;
+    static uint8_t search_speed = 15;
+    static int16_t speed_target = 20;
     Motor_Enable();
 
-
-    //简化循迹代码
-    IR_Read(ir);
-
-    static uint32_t last_control_tick = 0;
-    static float ir_err_filtered = 0.0f;
-    static uint8_t first_track = 1;
-
-    /* 假设 Timer_count 每 1ms 加 1：每 5ms 控制一次 */
-    if ((uint32_t)(Timer_count - last_control_tick) < 5U) {
+    if (Timer_count == task4_last_control_tick) {
         return;
     }
-    last_control_tick = Timer_count;
+    task4_last_control_tick = Timer_count;
 
-    /* 读取循迹传感器：这个函数内部不要有 delay */
     IR_Read(ir);
+    position = IR_GetPosition(ir);
 
-    /* 丢线：先保持上一帧电机输出，不重新计算 PID */
-    if (IR_GetSensorCount(ir) == 0) {
-        return;
-    }
+    speed_diff = (-position) * 4;
+    left_speed = speed_target - speed_diff;
+    right_speed = speed_target + speed_diff;
 
-    /* 读取循迹误差 */
-    float ir_err = IR_GetError(ir);
+    if(left_speed > 70)left_speed = 70;
+    if(left_speed < -70)left_speed = -70;
+    if(right_speed > 70)right_speed = 70;
+    if(right_speed < -70)right_speed = -70;
 
-    /* 低通滤波，减少数字循迹误差跳变 */
-    if (first_track) {
-        ir_err_filtered = ir_err;
-        first_track = 0;
-    } else {
-        ir_err_filtered = 0.7f * ir_err_filtered
-                        + 0.3f * ir_err;
-    }
+    //丢线处理
+    if (IR_IsLineLost(ir)){
+        lost_count++;
 
-    /* 循迹 PID：目标误差为 0 */
-    turn_out = PID_Calc(&g_ir_pid, 0.0f, ir_err_filtered);
-
-    /* 差速转向 */
-    speed_left  = speed_target - turn_out;
-    speed_right = speed_target + turn_out;
-
-    /* 电机输出限幅 */
-    if (speed_left > 70) speed_left = 70;
-    if (speed_left < 10) speed_left = 10;
-    if (speed_right > 70) speed_right = 70;
-    if (speed_right < 10) speed_right = 10;
-
-    Motor_SetSpeed(speed_left, speed_right);
-
-            if(Timer_count >last_Timer_Count )
-            {
-                last_Timer_Count = Timer_count;
-                print_div++;
+        if(lost_count < 10){
+            if(position < 0 ){
+                Motor_SetSpeed(-search_speed, search_speed);
+            }else{
+                Motor_SetSpeed(search_speed, -search_speed);
             }
-
-            //数据输出
-            if (print_div >= 20) {
-                print_div = 0;
-                
-                //输出调试
-                printf("out:%f,%f,%f,%f,%f\r\n",speed_left,speed_right,speed_target,ir_err_filtered,turn_out);
-            }
+        }else{
+            Motor_Disable();
+        }
+    }else{
+        lost_count = 0;
+        Motor_SetSpeed(left_speed, right_speed);
+    }
+    
+    
 
 }
 
