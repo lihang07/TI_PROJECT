@@ -44,9 +44,6 @@ volatile float q0=1.0f, q1, q2, q3;
  * ============================================ */
 volatile uint32_t lastUpdate, now;
 
-static void calibrateGyroBias(void);
-static uint8_t gyroBiasCalibrated = 0;
-
 /* ============================================
  * Yaw角度平滑滤波
  * yaw[5]: 滑动窗口滤波数组
@@ -106,10 +103,6 @@ void IMU_init(void) {
     if (0==ICM42688_Init()) {
         q0=1.0f; q1=q2=q3=0.0f;  /* 单位四元数: q0=1表示无旋转 */
         exInt=eyInt=ezInt=0.0f;  /* 重置积分项 */
-        if (!gyroBiasCalibrated) {
-            calibrateGyroBias();
-            gyroBiasCalibrated = 1;
-        }
         return;
     }
     printf("IMU Init ERROR!!\r\n");
@@ -131,30 +124,6 @@ static double Gf[3][300], Gt[3], sqGt[3];
 static int Gif=0, Gc=0;
 static float go[3]={0};
 static int Cc=0;
-
-static void calibrateGyroBias(void)
-{
-    const uint16_t sampleCount = 100;
-    icm42688_real_data_t accel;
-    icm42688_real_data_t gyro;
-    float sum[3] = {0.0f, 0.0f, 0.0f};
-    uint16_t i;
-
-    printf("IMU gyro calibration: keep still\r\n");
-    for (i = 0; i < sampleCount; i++) {
-        ICM42688_ReadMotion6(&accel, &gyro);
-        sum[0] += gyro.x;
-        sum[1] += gyro.y;
-        sum[2] += gyro.z;
-        delay_cycles((CPUCLK_FREQ / 1000UL) * 10UL);
-    }
-
-    go[0] = sum[0] / sampleCount;
-    go[1] = sum[1] / sampleCount;
-    go[2] = sum[2] / sampleCount;
-    printf("IMU gyro bias: %.4f,%.4f,%.4f dps\r\n",
-           go[0], go[1], go[2]);
-}
 
 /* calGyroVar: 计算陀螺仪方差并检测静止状态
  * 参数:

@@ -888,19 +888,3 @@ void OLED_Init(void)
 	
 	OLED_Clear();   /* 清屏，确保初始状态干净 */
 }
-
-void OLED_RefreshPage(u8 page)
-{
-    u8 n;
-
-    if (page >= 8) {
-        return;
-    }
-
-    OLED_WR_Byte(0xB0 + page, OLED_CMD);
-    OLED_WR_Byte(0x00, OLED_CMD);
-    OLED_WR_Byte(0x10, OLED_CMD);
-    for (n = 0; n < 128; n++) {
-        OLED_WR_Byte(OLED_GRAM[n][page], OLED_DATA);
-    }
-}
