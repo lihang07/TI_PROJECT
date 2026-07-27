@@ -29,15 +29,14 @@ static int16_t g_last_position = 0;
  */
 void IR_Read(uint8_t *ir)
 {
-    /* DL_GPIO_readPins 读取指定端口的指定引脚电平 */
-    ir[0] = (DL_GPIO_readPins(XG_G1_PORT, XG_G1_PIN) ? 1 : 0);
-    ir[1] = (DL_GPIO_readPins(XG_G2_PORT, XG_G2_PIN) ? 1 : 0);
-    ir[2] = (DL_GPIO_readPins(XG_G3_PORT, XG_G3_PIN) ? 1 : 0);
-    ir[3] = (DL_GPIO_readPins(XG_G4_PORT, XG_G4_PIN) ? 1 : 0);
-    ir[4] = (DL_GPIO_readPins(XG_G5_PORT, XG_G5_PIN) ? 1 : 0);
-    ir[5] = (DL_GPIO_readPins(XG_G6_PORT, XG_G6_PIN) ? 1 : 0);
-    ir[6] = (DL_GPIO_readPins(XG_G7_PORT, XG_G7_PIN) ? 1 : 0);
-    ir[7] = (DL_GPIO_readPins(XG_G8_PORT, XG_G8_PIN) ? 1 : 0);
+    ir[0] = ((DL_GPIO_readPins(XG_G1_PORT, XG_G1_PIN) != 0) == IR_BLACK_LEVEL);
+    ir[1] = ((DL_GPIO_readPins(XG_G2_PORT, XG_G2_PIN) != 0) == IR_BLACK_LEVEL);
+    ir[2] = ((DL_GPIO_readPins(XG_G3_PORT, XG_G3_PIN) != 0) == IR_BLACK_LEVEL);
+    ir[3] = ((DL_GPIO_readPins(XG_G4_PORT, XG_G4_PIN) != 0) == IR_BLACK_LEVEL);
+    ir[4] = ((DL_GPIO_readPins(XG_G5_PORT, XG_G5_PIN) != 0) == IR_BLACK_LEVEL);
+    ir[5] = ((DL_GPIO_readPins(XG_G6_PORT, XG_G6_PIN) != 0) == IR_BLACK_LEVEL);
+    ir[6] = ((DL_GPIO_readPins(XG_G7_PORT, XG_G7_PIN) != 0) == IR_BLACK_LEVEL);
+    ir[7] = ((DL_GPIO_readPins(XG_G8_PORT, XG_G8_PIN) != 0) == IR_BLACK_LEVEL);
 }
 
 /* ==================== 第1层：位置计算 ==================== */
