@@ -79,7 +79,7 @@ void task5(void);
 void task6(void);                                      /* 声明A到B到C到D再回A的任务函数 */
 void task6_reset(void);                                /* 声明task6重新进入时的复位函数 */
 void task7(void);
-
+void task8(void);
 
 
 //==========  全局变量定义区 =============//
@@ -106,6 +106,9 @@ static volatile uint32_t g_imu_sample_seq = 0;
 static float g_yaw_target = 0.0f;
 static uint32_t last_Timer_Count = 0;
 static volatile uint8_t g_task6_reset_request = 0U; /* task6重新进入时的软件复位请求标志 */
+
+//=============循迹控制区==================//
+static uint8_t ir[8];
 
 /* ==================== 主函数 ==================== */
 int main(void)
@@ -511,8 +514,9 @@ void task4(void)
                 }else {
                     ir_lose_count = 0;
                     Motor_Disable();
-                    float turn_yaw = turn_end_yaw - turn_start_yaw;
-                    g_yaw_target = turn_yaw + 30.0f;
+                    float turn_yaw = Yaw_Error(turn_end_yaw,turn_start_yaw);
+                    if(turn_yaw > 0) g_yaw_target = turn_end_yaw + 30.0f;
+                    else g_yaw_target = turn_end_yaw - 30.0f;
                     task3_runing_state = 2;
                     return;
                 }
@@ -523,13 +527,15 @@ void task4(void)
             }
         }
         else if(task3_runing_state == 2){
+            Motor_Enable();
             //状态3：姿态调整，有循迹信号时切换状态
             current_yaw = g_imu_ypr[0];
             float yaw_err = Yaw_Error(g_yaw_target,current_yaw);
             turn_out = PID_Calc(&g_yaw_pid, yaw_err, 0.0f);
-            Motor_SetSpeed(-turn_out , turn_out);
-            if(yaw_err < 5.0f){
-                task3_runing_state = 0;
+            float turn_real_out = turn_out + 5;
+            Motor_SetSpeed(-turn_real_out , turn_real_out);
+            if(fabs(yaw_err) < 5.0f){
+                Motor_Disable();
             }
 
         }
@@ -689,7 +695,7 @@ void task1(void)
     const float wheel_c       = PI * 6.5f;  /* 轮子周长(cm) */
     const float pulse_per_cm  = (ENCODER_PPR * 28.0f) / wheel_c; /* 每厘米脉冲数 = 13*28/周长 */
     static uint8_t print_div = 0;
-
+    const float target_dist   = 100.0f;     /* 目标距离(cm) */
 
     /* ===== 状态0：初始化 ===== */
     if (state == 0) {
