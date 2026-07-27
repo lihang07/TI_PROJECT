@@ -84,6 +84,9 @@ void OLED_DisPlay_Off(void);
  *       每帧128x64像素分成8页，每页128字节 */
 void OLED_Refresh(void);
 
+/* 只刷新指定页（0~7），用于实时控制中分散OLED通信耗时 */
+void OLED_RefreshPage(u8 page);
+
 /* OLED_Clear: 清屏函数
  * 说明: 将GRAM显存全部清零，然后刷新到屏幕
  *       执行后屏幕变为全黑 */

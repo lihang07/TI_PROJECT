@@ -76,9 +76,9 @@ void task4(void);
 
 //临时函数任务区
 void task5(void);
-void task6(void);
+void task6(void);                                      /* 声明A到B到C到D再回A的任务函数 */
+void task6_reset(void);                                /* 声明task6重新进入时的复位函数 */
 void task7(void);
-void task8(void);
 
 
 
@@ -93,7 +93,7 @@ PID_t g_ir_pid;         /* 循迹闭环PID结构体 */
 static volatile uint32_t TIMA0_count = 0;
 
 //==========  IMU全局数据区（主循环读取，各任务共享） ==========//
-static float g_imu_ypr[3] = {0};        /* 姿态角 [yaw, pitch, roll]，单位：度 */
+static volatile float g_imu_ypr[3] = {0}; /* 姿态角由中断更新，使用volatile保证任务读取最新值 */
 static float g_imu_gyro[3] = {0};       /* 陀螺仪角速度 [gx, gy, gz]，单位：度/秒 */
 static int g_imu_data_valid = 1;
 static int8_t g_imu_status = 0;         /* IMU状态：0=正常，-2=校准中，其他=错误 */
@@ -105,9 +105,7 @@ static volatile uint32_t g_imu_sample_seq = 0;
 //==========IMU闭环控制区==========//
 static float g_yaw_target = 0.0f;
 static uint32_t last_Timer_Count = 0;
-
-//============循迹控制区=============//
-static uint8_t ir[8];
+static volatile uint8_t g_task6_reset_request = 0U; /* task6重新进入时的软件复位请求标志 */
 
 /* ==================== 主函数 ==================== */
 int main(void)
@@ -142,6 +140,7 @@ int main(void)
 
 
     uint8_t key_status = 0;
+    Cartask previous_state = status_stop;
    
     while (1) {
 
@@ -156,6 +155,11 @@ int main(void)
         else if (key_status == 2) state = status_task2;
         else if (key_status == 3) state = status_task3;
         else if (key_status == 4) state = status_task4;
+
+        if (state == status_task2 && previous_state != status_task2) {
+            task6_reset();
+        }
+        previous_state = state;
        
         switch(state)
         {
@@ -210,6 +214,7 @@ void TIMER_0_INST_IRQHandler(void)
     switch (DL_TimerG_getPendingInterrupt(TIMER_0_INST)) {
     case DL_TIMER_IIDX_ZERO:
         IMU_getYawPitchRoll((float *)g_imu_ypr);  // 获取当前姿态角
+        g_imu_data_valid = 1;                    // 已获得一帧姿态数据，允许任务使用陀螺仪闭环
         break;
     default:
         break;
@@ -683,7 +688,6 @@ void task1(void)
     static uint8_t state = 0;               /* 状态机: 0=初始化, 1=运行中, 2=完成 */
     const float wheel_c       = PI * 6.5f;  /* 轮子周长(cm) */
     const float pulse_per_cm  = (ENCODER_PPR * 28.0f) / wheel_c; /* 每厘米脉冲数 = 13*28/周长 */
-    const float target_dist   = 100.0f;     /* 目标距离(cm) */
     static uint8_t print_div = 0;
 
 
@@ -728,8 +732,6 @@ void task1(void)
     
 
     float current_position = Motor_GetLeftEncoderPosition() / pulse_per_cm;
-    float speed_err = PID_GetError(target_dist,current_position);
-
     speed_out = PID_Calc(&g_speed_pid, target_dist, current_position);
 
     int8_t left_out = speed_out - turn_out;
@@ -769,229 +771,237 @@ void task1(void)
     
 }
 
-void task6(void)
-{                                                       /* task6状态机开始 */
-    static uint8_t g_task6_reset_request;               /* task6的软件复位标志 */
 
-    static uint8_t state = 0;                           /* 状态：0初始化，1第一次直行，2第一次循迹，3第二次直行，4第二次循迹，5停车，6第一次出弯补转，7第二次出弯补转 */
-    static uint8_t ir[8] = {0};                         /* 保存8路循迹传感器的采样值 */
-    static uint8_t black_line_count = 0;                /* 连续检测到黑线的次数 */
-    static uint8_t no_line_count = 0;                   /* 连续没有检测到黑线的次数 */
-    static uint8_t print_div = 0;                       /* 调试打印分频计数器 */
-    static uint8_t curve_slow_flag = 0;                 /* 弯道末期降速标志 */
-    static uint16_t turn_hold_count = 0;                /* 丢线后继续转弯的计数器 */
-    static uint8_t turn_speed_avg_ready = 0;            /* 弯道末段速度平均值是否已经有效 */
-    static float turn_speed_avg_left = 28.0f;           /* 弯道末段左轮速度的指数平均值 */
-    static float turn_speed_avg_right = 28.0f;          /* 弯道末段右轮速度的指数平均值 */
-    static int16_t last_track_left = 28;                /* 丢线后补转所用的左轮平均速度 */
-    static int16_t last_track_right = 28;               /* 丢线后补转所用的右轮平均速度 */
+void task6(void)                                        /* 执行A到B到C到D再回A的任务 */
+{                                                       /* A到B到C到D再回A的控制状态机开始 */
+    typedef enum {                                      /* 定义task6内部运行状态 */
+        TASK6_STATE_INIT = 0,                           /* 初始化状态 */
+        TASK6_STATE_WAIT_IMU,                           /* 等待陀螺仪数据有效状态 */
+        TASK6_STATE_IMU_SETTLE,                         /* 陀螺仪有效后的静置状态 */
+        TASK6_STATE_STRAIGHT_AB,                        /* A到B双环直行状态 */
+        TASK6_STATE_TRACK_BC,                           /* B到C灰度巡线状态 */
+        TASK6_STATE_STRAIGHT_CD,                        /* C到D双环直行状态 */
+        TASK6_STATE_TRACK_DA,                           /* D到A灰度巡线状态 */
+        TASK6_STATE_FINISHED                            /* 回到A后的停车状态 */
+    } Task6_State_t;                                    /* 完成task6状态类型定义 */
 
-    const float wheel_c = PI * 6.5f;                    /* 轮子周长，单位cm */
-    const float pulse_per_cm = (ENCODER_PPR * 28.0f) / wheel_c; /* 每厘米对应的编码器脉冲数 */
-    const float wheel_base = 16.5f;                     /* 两个轮胎中心之间的距离，单位cm */
-    const float target_dist = 100.0f;                   /* 直线段参考距离，单位cm */
-    const int16_t straight_speed = 28;                  /* 陀螺仪直线行驶时的基础速度 */
-    const int16_t track_base_speed = 36;                /* 循迹基础速度提高为原来的两倍 */
-    const int16_t track_slow_speed = 24;                /* 弯道末期循迹低速提高为原来的两倍 */
-    const int16_t max_diff = 35;                        /* 循迹时左右轮最大差速限制 */
-    const float curve_slow_angle = 150.0f;              /* 估算转角超过该角度后，认为接近出弯并开始降速 */
-    const float turn_avg_start_angle = 120.0f;          /* 转角达到120度后才开始统计出弯前的平均速度 */
-    const float turn_speed_avg_alpha = 0.25f;           /* 指数平均系数，数值越大越重视最近的末段速度 */
-    const uint16_t turn_hold_ticks = 99;                /* 丢线后继续转弯约0.24s，原延时缩短为二分之一 */
-    const uint8_t line_confirm_count = 3;               /* 连续检测到黑线达到该次数后，才确认找到黑线 */
-    const uint8_t lost_line_confirm_count = 5;          /* 连续丢失黑线达到该次数后，才确认离开黑线 */
+    static Task6_State_t state = TASK6_STATE_INIT;      /* 保存task6当前运行状态 */
+    static uint8_t ir_value[IR_NUM] = {0U};             /* 保存八路灰度传感器的归一化结果 */
+    static uint8_t line_count = 0U;                     /* 保存连续检测到黑线的次数 */
+    static uint8_t lost_count = 0U;                     /* 保存连续检测不到黑线的次数 */
+    static uint8_t print_div = 0U;                      /* 保存串口调试输出分频计数 */
+    static int32_t left_position_origin = 0;            /* 保存当前直线段左轮编码器起点 */
+    static int32_t right_position_origin = 0;           /* 保存当前直线段右轮编码器起点 */
 
-    if (g_task6_reset_request) {                        /* 判断是否需要重新开始task6 */
-        state = 0;                                      /* 回到初始化状态 */
-        black_line_count = 0;                           /* 清零黑线确认计数 */
-        no_line_count = 0;                              /* 清零丢线确认计数 */
-        curve_slow_flag = 0;                            /* 清零弯道末期降速标志 */
-        turn_hold_count = 0;                            /* 清零出弯补转计数器 */
-        turn_speed_avg_ready = 0;                       /* 清除弯道末段速度平均有效标志 */
-        turn_speed_avg_left = straight_speed;           /* 复位弯道末段左轮平均速度 */
-        turn_speed_avg_right = straight_speed;          /* 复位弯道末段右轮平均速度 */
-        last_track_left = straight_speed;               /* 复位丢线前左轮速度记录 */
-        last_track_right = straight_speed;              /* 复位丢线前右轮速度记录 */
-        ir_last_err = 0.0f;                             /* 清零循迹PID的上一次误差 */
-        g_task6_reset_request = 0;                      /* 清除复位请求 */
-    }                                                   /* 复位处理结束 */
+    const float wheel_c = PI * 6.5f;                    /* 按直径6.5厘米计算车轮周长 */
+    const float pulse_per_cm = (ENCODER_PPR * 28.0f) / wheel_c; /* 按减速比28计算每厘米编码器脉冲数 */
+    const float ab_position_target = 100.0f;            /* 根据赛道图设置A到B位置环参考距离为100厘米 */
+    const float cd_position_target = 100.0f;            /* C到D也以100厘米作位置环调速参考且不用于切段 */
+    const float line_diff_gain = 0.8f;                  /* 设置巡线PID输出的非线性差速增益 */
+    const int16_t straight_min_speed = 28;              /* 设置双环直行的最低前进速度 */
+    const int16_t straight_max_speed = 55;              /* 设置双环直行的最高前进速度 */
+    const int16_t track_base_speed = 36;                /* 设置弧线巡线的基础前进速度 */
+    const int16_t motor_min_speed = 10;                 /* 设置行驶中单轮最低有效速度 */
+    const int16_t motor_max_speed = 60;                 /* 设置行驶中单轮最高安全速度 */
+    const float max_track_diff = 35.0f;                 /* 设置巡线时左右轮最大差速 */
+    const uint8_t line_confirm_count = 3U;              /* 连续三次检测到黑线后确认进入巡线 */
+    const uint8_t lost_confirm_count = 5U;              /* 连续五次检测不到黑线后确认离开弧线 */
+    const uint16_t imu_settle_ticks = 10U;              /* 按十毫秒控制周期设置一百毫秒静置时间 */
 
-    if (state == 0) {                                   /* 状态0：任务初始化 */
-        Motor_ResetLeftEncoder();                       /* 左轮编码器清零 */
-        Motor_ResetRightEncoder();                      /* 右轮编码器清零 */
-        Timer_count = 0;                                /* 控制定时计数清零 */
-        black_line_count = 0;                           /* 初始化时默认还没有确认黑线 */
-        no_line_count = 0;                              /* 初始化时默认还没有确认丢线 */
-        curve_slow_flag = 0;                            /* 初始化时不启用弯道降速 */
-        turn_hold_count = 0;                            /* 初始化出弯补转计数器 */
-        turn_speed_avg_ready = 0;                       /* 初始化弯道末段速度平均有效标志 */
-        turn_speed_avg_left = straight_speed;           /* 初始化弯道末段左轮平均速度 */
-        turn_speed_avg_right = straight_speed;          /* 初始化弯道末段右轮平均速度 */
-        last_track_left = straight_speed;               /* 初始化丢线前左轮速度记录 */
-        last_track_right = straight_speed;              /* 初始化丢线前右轮速度记录 */
-        ir_last_err = 0.0f;                             /* 清除循迹PID历史误差 */
-        g_yaw_target = 0.0f;                            /* 第一次直行目标角度设为陀螺仪0度 */
-        PID_Init(&g_yaw_pid, 0.35f, 0.0f, 0.08f,         /* 按task1的参数初始化直线行驶角度环PID */
-                 100.0f, -20.0f, 20.0f);               /* 设置角度环PID积分限幅和输出限幅 */
-        PID_Init(&g_speed_pid, 0.45f, 0.1f, 0.01f,       /* 按task1的参数初始化直线行驶速度环PID */
-                 50.0f, 5.0f, 60.0f);                  /* 设置速度环PID积分限幅和输出限幅 */
-        state = 1;                                      /* 进入第一次直线行驶状态 */
-        printf("task6: gyro straight 1\r\n");          /* 串口打印当前进入第一次直行 */
-    }                                                   /* 状态0处理结束 */
+    if (g_task6_reset_request != 0U) {                  /* 判断主程序是否请求重新开始task6 */
+        state = TASK6_STATE_INIT;                       /* 把状态机恢复到初始化状态 */
+        line_count = 0U;                                /* 清零黑线确认计数 */
+        lost_count = 0U;                                /* 清零丢线确认计数 */
+        print_div = 0U;                                 /* 清零调试输出分频计数 */
+        g_task6_reset_request = 0U;                     /* 清除已经处理的软件复位请求 */
+    }                                                   /* task6软件复位处理结束 */
 
-    if (Timer_count < 1) {                              /* 判断是否到达一次控制周期 */
-        return;                                         /* 控制周期未到，直接返回 */
-    }                                                   /* 控制周期判断结束 */
-    Timer_count = 0;                                    /* 清零控制周期计数，开始本次控制 */
+    if (state == TASK6_STATE_INIT) {                    /* 第一次进入或重新进入task6时执行初始化 */
+        Motor_Disable();                                /* 初始化期间关闭电机以防车辆误动 */
+        left_position_origin = Motor_GetLeftEncoderPosition(); /* 记录左轮当前位置并避开QEI硬件未清零问题 */
+        right_position_origin = Motor_GetRightEncoderPosition(); /* 记录右轮当前位置作为相对位置起点 */
+        Timer_count = 0;                                /* 清零十毫秒控制周期计数 */
+        line_count = 0U;                                /* 清零黑线确认计数 */
+        lost_count = 0U;                                /* 清零丢线确认计数 */
+        print_div = 0U;                                 /* 清零调试输出分频计数 */
+        state = TASK6_STATE_WAIT_IMU;                   /* 转入等待陀螺仪数据有效状态 */
+        printf("task6: wait imu\r\n");                /* 通过串口提示正在等待陀螺仪 */
+        return;                                         /* 本周期保持车辆静止 */
+    }                                                   /* task6初始化处理结束 */
 
-    IR_Read(ir);                                        /* 读取8路循迹传感器 */
-    if (IR_GetSensorCount(ir) > 0) {                    /* 判断当前是否至少有一路检测到黑线 */
-        if (black_line_count < line_confirm_count) {    /* 防止黑线计数超过确认阈值 */
-            black_line_count++;                         /* 黑线连续检测次数加1 */
-        }                                               /* 黑线计数限幅结束 */
-        no_line_count = 0;                              /* 检测到黑线后，丢线计数清零 */
-    } else {                                            /* 当前没有任何传感器检测到黑线 */
-        if (no_line_count < lost_line_confirm_count) {  /* 防止丢线计数超过确认阈值 */
-            no_line_count++;                            /* 丢线连续次数加1 */
-        }                                               /* 丢线计数限幅结束 */
-        black_line_count = 0;                           /* 没检测到黑线，黑线确认计数清零 */
-    }                                                   /* 循迹传感器防抖处理结束 */
-
-    if (state == 1 || state == 3) {                     /* 状态1或3：使用陀螺仪保持直线行驶 */
-        if (!g_imu_data_valid) {                        /* 判断陀螺仪数据是否有效 */
-            Motor_Disable();                            /* 陀螺仪无效时关闭电机 */
-            return;                                     /* 等待下一次有效陀螺仪数据 */
+    if (state == TASK6_STATE_WAIT_IMU) {                /* 等待主函数中的陀螺仪中断产生有效姿态 */
+        Motor_Disable();                                /* 等待期间继续关闭电机 */
+        if (g_imu_data_valid == 0U) {                   /* 判断是否仍未收到有效姿态数据 */
+            return;                                     /* 数据无效时继续等待下一次调用 */
         }                                               /* 陀螺仪有效性判断结束 */
+        Timer_count = 0;                                /* 从数据有效时刻开始计算静置时间 */
+        state = TASK6_STATE_IMU_SETTLE;                 /* 转入陀螺仪静置状态 */
+        printf("task6: imu settle 100ms\r\n");        /* 通过串口提示静置校准阶段 */
+        return;                                         /* 本周期不启动电机 */
+    }                                                   /* 等待陀螺仪状态处理结束 */
 
-        float current_yaw = g_imu_ypr[0];               /* 读取当前偏航角 */
-        float turn_out = PID_Calc(&g_yaw_pid, g_yaw_target, current_yaw); /* 用角度环PID计算左右轮修正量 */
-        float left_dist = Motor_GetLeftEncoderPosition() / pulse_per_cm; /* 计算左轮已经行驶的距离 */
-        float right_dist = Motor_GetRightEncoderPosition() / pulse_per_cm; /* 计算右轮已经行驶的距离 */
-        float current_position = (left_dist + right_dist) * 0.5f; /* 用左右轮平均距离作为直线段当前位置 */
-        float speed_out = PID_Calc(&g_speed_pid, target_dist, current_position); /* 用速度环PID计算基础速度 */
+    if (state == TASK6_STATE_IMU_SETTLE) {              /* 在起步前保持一百毫秒静止 */
+        Motor_Disable();                                /* 静置期间继续关闭电机 */
+        if (g_imu_data_valid == 0U) {                   /* 检查静置期间姿态数据是否失效 */
+            state = TASK6_STATE_WAIT_IMU;               /* 数据失效时返回等待状态 */
+            Timer_count = 0;                            /* 重新开始有效数据等待计时 */
+            return;                                     /* 本周期结束且保持停车 */
+        }                                               /* 静置期间数据检查结束 */
+        if (Timer_count < imu_settle_ticks) {           /* 判断一百毫秒静置时间是否达到 */
+            return;                                     /* 静置时间不足时继续等待 */
+        }                                               /* 静置时间判断结束 */
+        Timer_count = 0;                                /* 清零控制周期计数以准备起步 */
+        g_yaw_target = g_imu_ypr[0];                    /* 把A点车头方向保存为A到B目标角度 */
+        left_position_origin = Motor_GetLeftEncoderPosition(); /* 记录A点左轮编码器读数作为位置零点 */
+        right_position_origin = Motor_GetRightEncoderPosition(); /* 记录A点右轮编码器读数作为位置零点 */
+        PID_Init(&g_yaw_pid, 0.35f, 0.0f, 0.08f, 100.0f, -20.0f, 20.0f); /* 初始化直行角度环PID */
+        PID_Init(&g_speed_pid, 0.45f, 0.10f, 0.01f, 50.0f, 0.0f, 55.0f); /* 初始化直行位置环PID */
+        PID_Init(&g_ir_pid, 0.8f, 0.0f, 0.14f, 0.0f, -10.0f, 10.0f); /* 初始化灰度位置PID */
+        state = TASK6_STATE_STRAIGHT_AB;                /* 转入A到B双环直行状态 */
+        printf("task6: straight AB\r\n");             /* 通过串口提示开始A到B直行 */
+        return;                                         /* 下一控制周期再输出电机命令 */
+    }                                                   /* 陀螺仪静置处理结束 */
 
-        if (speed_out < straight_speed) speed_out = straight_speed; /* 直线末期不允许速度低于匀速值，避免减速进入循迹 */
-        if (speed_out > 60.0f) speed_out = 60.0f;        /* 限制基础速度最大值 */
+    if (state == TASK6_STATE_FINISHED) {                /* 判断整圈任务是否已经完成 */
+        Motor_Disable();                                /* 完成后持续关闭电机 */
+        return;                                         /* 完成状态不再执行后续控制 */
+    }                                                   /* 完成停车状态处理结束 */
 
-        int16_t left = (int16_t)(speed_out - turn_out);  /* 左轮速度等于基础速度减角度修正 */
-        int16_t right = (int16_t)(speed_out + turn_out); /* 右轮速度等于基础速度加角度修正 */
-        if (left > 60) left = 60;                        /* 左轮速度上限保护 */
-        if (left < 10) left = 10;                        /* 左轮速度下限保护 */
-        if (right > 60) right = 60;                      /* 右轮速度上限保护 */
-        if (right < 10) right = 10;                      /* 右轮速度下限保护 */
-        Motor_Enable();                                  /* 使能电机驱动 */
-        Motor_SetSpeed(left, right);                     /* 设置左右轮速度，实现双环PID直行 */
+    if (Timer_count < 1) {                              /* 判断十毫秒控制周期是否到达 */
+        return;                                         /* 控制周期未到时不重复计算PID */
+    }                                                   /* 控制周期判断结束 */
+    Timer_count = 0;                                    /* 消耗本次十毫秒控制周期 */
+    IR_Read(ir_value);                                  /* 读取八路灰度传感器且一表示黑线 */
 
-        if (black_line_count >= line_confirm_count) {    /* 连续检测到黑线后，准备切换到循迹 */
-            no_line_count = 0;                           /* 切换前清零丢线计数 */
-            ir_last_err = 0.0f;                          /* 切换前清零循迹PID历史误差 */
-            curve_slow_flag = 0;                         /* 进入新弯道前清零弯道降速标志 */
-            turn_speed_avg_ready = 0;                    /* 进入新弯道前清除末段速度平均有效标志 */
-            turn_speed_avg_left = straight_speed;        /* 进入新弯道前复位左轮平均速度 */
-            turn_speed_avg_right = straight_speed;       /* 进入新弯道前复位右轮平均速度 */
-            Motor_ResetLeftEncoder();                    /* 进入循迹弯道时清零左轮编码器，用于估算转过角度 */
-            Motor_ResetRightEncoder();                   /* 进入循迹弯道时清零右轮编码器，用于估算转过角度 */
-            state = (state == 1) ? 2 : 4;                /* 第一次直行后进入第一次循迹，第二次直行后进入第二次循迹 */
-            printf("task6: track %d\r\n", (state == 2) ? 1 : 2); /* 串口打印当前进入第几段循迹 */
-        }                                               /* 直行切换到循迹处理结束 */
-    } else if (state == 2 || state == 4) {               /* 状态2或4：根据循迹模块信号进行循迹 */
-        if (no_line_count >= lost_line_confirm_count) {  /* 连续丢线后，认为当前循迹段结束 */
-            black_line_count = 0;                        /* 清零黑线确认计数 */
-            ir_last_err = 0.0f;                          /* 清零循迹PID历史误差 */
-            turn_hold_count = 0;                         /* 准备开始出弯补转计时 */
-            if (turn_speed_avg_ready) {                  /* 如果已经采集到弯道末段的平均速度 */
-                last_track_left = (int16_t)turn_speed_avg_left; /* 使用左轮末段平均速度进行补转 */
-                last_track_right = (int16_t)turn_speed_avg_right; /* 使用右轮末段平均速度进行补转 */
-            }                                           /* 末段平均速度切换完成 */
+    if (state == TASK6_STATE_STRAIGHT_AB || state == TASK6_STATE_STRAIGHT_CD) { /* 处理两个无黑线直线段 */
+        float current_yaw;                              /* 保存当前车身偏航角 */
+        float yaw_error;                                /* 保存经过正负一百八十度包角的角度误差 */
+        float turn_out;                                 /* 保存角度环输出的左右轮差速修正 */
+        float left_distance;                            /* 保存左轮累计行驶距离 */
+        float right_distance;                           /* 保存右轮累计行驶距离 */
+        float current_position;                         /* 保存双轮平均行驶位置 */
+        float position_target;                          /* 保存当前直线段的位置环参考值 */
+        float base_out;                                 /* 保存位置环输出的基础速度 */
+        int16_t left_cmd;                               /* 保存从车头正前方看到的左轮命令 */
+        int16_t right_cmd;                              /* 保存从车头正前方看到的右轮命令 */
+        uint8_t active_count;                           /* 保存当前检测到黑线的传感器数量 */
 
-            if (state == 2) {                            /* 如果结束的是第一段循迹 */
-                state = 6;                               /* 进入第一次出弯补转状态 */
-                printf("task6: turn hold 1\r\n");       /* 串口打印第一次出弯补转 */
-            } else {                                     /* 如果结束的是第二段循迹 */
-                state = 7;                               /* 进入第二次出弯补转状态 */
-                printf("task6: turn hold 2\r\n");       /* 串口打印第二次出弯补转 */
-            }                                           /* 循迹结束后的状态切换完成 */
-            return;                                      /* 状态已经切换，本周期直接返回 */
-        }                                               /* 丢线结束判断完成 */
+        if (g_imu_data_valid == 0U) {                   /* 直行前检查陀螺仪数据是否有效 */
+            Motor_Disable();                            /* 姿态数据异常时立即安全停车 */
+            return;                                     /* 等待姿态数据恢复后再继续 */
+        }                                               /* 直行姿态有效性检查结束 */
 
-        float err = IR_GetError(ir);                     /* 根据8路循迹信号计算黑线位置误差 */
-        float correction = IR_PID_Control(err);          /* 根据循迹误差计算PID修正量 */
-        float diff = 0.8f * correction * fabsf(correction); /* 对修正量做非线性放大，误差越大转向越强 */
-        float track_left_dist = fabsf(Motor_GetLeftEncoderPosition() / pulse_per_cm); /* 计算进入弯道后左轮累计距离 */
-        float track_right_dist = fabsf(Motor_GetRightEncoderPosition() / pulse_per_cm); /* 计算进入弯道后右轮累计距离 */
-        float curve_angle = fabsf(track_left_dist - track_right_dist) / wheel_base * 180.0f / PI; /* 根据左右轮距离差估算车身转过角度 */
+        active_count = IR_GetSensorCount(ir_value);     /* 统计当前检测到黑线的灰度通道数 */
+        if (active_count > 0U) {                        /* 判断是否接触到下一段黑色弧线 */
+            if (line_count < line_confirm_count) {      /* 防止黑线计数超过确认阈值 */
+                line_count++;                           /* 增加连续黑线检测次数 */
+            }                                           /* 黑线计数限幅处理结束 */
+        } else {                                        /* 当前没有任何灰度通道检测到黑线 */
+            line_count = 0U;                            /* 清零不连续的黑线检测计数 */
+        }                                               /* 直线段黑线防抖处理结束 */
 
-        if (curve_angle >= curve_slow_angle) {           /* 当弯道估算角度接近180度时 */
-            curve_slow_flag = 1;                         /* 打开弯道末期降速标志 */
-        }                                                /* 弯道降速判断结束 */
+        current_yaw = g_imu_ypr[0];                    /* 读取当前偏航角用于角度环反馈 */
+        yaw_error = Yaw_Error(g_yaw_target, current_yaw); /* 计算跨正负一百八十度连续的偏航误差 */
+        turn_out = PID_Calc(&g_yaw_pid, yaw_error, 0.0f); /* 用包角后的误差计算角度环修正 */
+        left_distance = fabsf((float)(Motor_GetLeftEncoderPosition() - left_position_origin)) / pulse_per_cm; /* 把左轮相对脉冲换算成正向厘米数 */
+        right_distance = fabsf((float)(Motor_GetRightEncoderPosition() - right_position_origin)) / pulse_per_cm; /* 把右轮相对脉冲换算成正向厘米数 */
+        current_position = (left_distance + right_distance) * 0.5f; /* 用双轮平均距离作为位置环反馈 */
+        position_target = (state == TASK6_STATE_STRAIGHT_AB) ? ab_position_target : cd_position_target; /* 选择当前直线段位置参考 */
+        base_out = PID_Calc(&g_speed_pid, position_target, current_position); /* 用位置环输出直行基础速度 */
+        if (base_out < (float)straight_min_speed) base_out = (float)straight_min_speed; /* 保证到达参考距离后仍寻找黑线 */
+        if (base_out > (float)straight_max_speed) base_out = (float)straight_max_speed; /* 限制位置环给出的最高速度 */
+        left_cmd = (int16_t)(base_out - turn_out);       /* 按当前实测符号计算正面所见左轮速度 */
+        right_cmd = (int16_t)(base_out + turn_out);      /* 按当前实测符号计算正面所见右轮速度 */
+        if (left_cmd < motor_min_speed) left_cmd = motor_min_speed; /* 限制左轮最低前进速度 */
+        if (left_cmd > motor_max_speed) left_cmd = motor_max_speed; /* 限制左轮最高前进速度 */
+        if (right_cmd < motor_min_speed) right_cmd = motor_min_speed; /* 限制右轮最低前进速度 */
+        if (right_cmd > motor_max_speed) right_cmd = motor_max_speed; /* 限制右轮最高前进速度 */
+        Motor_Enable();                                 /* 确保双路电机驱动已经使能 */
+        Motor_SetSpeed(left_cmd, right_cmd);             /* 按正面所见左轮和右轮顺序输出双环控制量 */
 
-        if (diff > max_diff) diff = max_diff;            /* 限制正方向最大差速 */
-        if (diff < -max_diff) diff = -max_diff;          /* 限制负方向最大差速 */
+        if (line_count >= line_confirm_count) {         /* 连续检测到黑线后确认直线段结束 */
+            line_count = 0U;                            /* 清零黑线确认计数 */
+            lost_count = 0U;                            /* 清零即将开始的丢线确认计数 */
+            PID_Init(&g_ir_pid, 0.8f, 0.0f, 0.14f, 0.0f, -10.0f, 10.0f); /* 清除上一段留下的巡线PID历史量 */
+            state = (state == TASK6_STATE_STRAIGHT_AB) ? TASK6_STATE_TRACK_BC : TASK6_STATE_TRACK_DA; /* 进入对应的黑色弧线 */
+            printf("task6: track %s\r\n", (state == TASK6_STATE_TRACK_BC) ? "BC" : "DA"); /* 输出当前巡线区段 */
+            return;                                     /* 状态切换后等待下一控制周期 */
+        }                                               /* 直线切换巡线处理结束 */
 
-        int16_t base = curve_slow_flag ? track_slow_speed : track_base_speed; /* 接近出弯时使用低速，否则使用正常循迹速度 */
-        int16_t left = base + (int16_t)diff;             /* 根据基础速度和差速计算左轮循迹速度 */
-        int16_t right = base - (int16_t)diff;            /* 根据基础速度和差速计算右轮循迹速度 */
+        if (++print_div >= 20U) {                       /* 每二百毫秒输出一次直线调试数据 */
+            print_div = 0U;                             /* 清零串口输出分频计数 */
+            printf("task6:S%u pos=%.2f/%.2f yawErr=%.2f pwm=%d,%d\r\n", (unsigned int)state, current_position, position_target, yaw_error, left_cmd, right_cmd); /* 输出双环反馈和正面所见左右轮命令 */
+        }                                               /* 直线调试输出处理结束 */
+    } else if (state == TASK6_STATE_TRACK_BC || state == TASK6_STATE_TRACK_DA) { /* 处理两个有黑线弧线段 */
+        float line_error;                               /* 保存灰度阵列计算出的黑线位置误差 */
+        float line_out;                                 /* 保存灰度位置PID的输出 */
+        float track_diff;                               /* 保存非线性放大后的巡线差速 */
+        int16_t left_cmd;                               /* 保存从车头正前方看到的左轮命令 */
+        int16_t right_cmd;                              /* 保存从车头正前方看到的右轮命令 */
+        uint8_t active_count;                           /* 保存当前检测到黑线的传感器数量 */
 
-        if (left > 60) left = 60;                        /* 左轮速度上限保护 */
-        if (left < 10) left = 10;                        /* 左轮速度下限保护 */
-        if (right > 60) right = 60;                      /* 右轮速度上限保护 */
-        if (right < 10) right = 10;                      /* 右轮速度下限保护 */
+        active_count = IR_GetSensorCount(ir_value);     /* 统计当前检测到黑线的灰度通道数 */
+        if (active_count == 0U) {                       /* 判断当前是否完全离开黑色弧线 */
+            if (lost_count < lost_confirm_count) {      /* 防止丢线计数超过确认阈值 */
+                lost_count++;                           /* 增加连续丢线检测次数 */
+            }                                           /* 丢线计数限幅处理结束 */
+        } else {                                        /* 当前仍有至少一路检测到黑线 */
+            lost_count = 0U;                            /* 清零不连续的丢线检测计数 */
+        }                                               /* 弧线段丢线防抖处理结束 */
 
-        Motor_SetSpeed(left, right);                     /* 输出循迹时的左右轮速度 */
-        if (curve_angle >= turn_avg_start_angle) {       /* 只采集出弯前一段的速度，避开入弯速度误差 */
-            if (!turn_speed_avg_ready) {                 /* 第一次采集末段速度时 */
-                turn_speed_avg_left = left;              /* 用当前左轮速度初始化平均值 */
-                turn_speed_avg_right = right;            /* 用当前右轮速度初始化平均值 */
-                turn_speed_avg_ready = 1;                /* 标记末段平均速度已经有效 */
-            } else {                                     /* 后续末段速度采样时 */
-                turn_speed_avg_left = turn_speed_avg_left * (1.0f - turn_speed_avg_alpha) + left * turn_speed_avg_alpha; /* 更新左轮末段指数平均速度 */
-                turn_speed_avg_right = turn_speed_avg_right * (1.0f - turn_speed_avg_alpha) + right * turn_speed_avg_alpha; /* 更新右轮末段指数平均速度 */
-            }                                            /* 末段速度平均更新完成 */
-            last_track_left = (int16_t)turn_speed_avg_left; /* 同步保存左轮补转平均速度 */
-            last_track_right = (int16_t)turn_speed_avg_right; /* 同步保存右轮补转平均速度 */
-        }                                                /* 出弯前速度采集判断结束 */
+        if (lost_count >= lost_confirm_count) {         /* 连续丢线后确认当前黑色弧线结束 */
+            line_count = 0U;                            /* 清零下一直线段的黑线确认计数 */
+            lost_count = 0U;                            /* 清零已经完成的丢线确认计数 */
+            if (state == TASK6_STATE_TRACK_BC) {        /* 判断是否刚完成B到C弧线 */
+                if (g_imu_data_valid == 0U) {           /* 切换C到D直线前检查陀螺仪 */
+                    Motor_Disable();                    /* 陀螺仪异常时立即停车 */
+                    lost_count = lost_confirm_count;    /* 保留切段条件以便数据恢复后继续 */
+                    return;                             /* 等待姿态数据恢复 */
+                }                                       /* C点陀螺仪有效性检查结束 */
+                g_yaw_target = g_imu_ypr[0];            /* 把C点出弧方向保存为C到D目标角度 */
+                left_position_origin = Motor_GetLeftEncoderPosition(); /* 记录C点左轮编码器读数作为新位置零点 */
+                right_position_origin = Motor_GetRightEncoderPosition(); /* 记录C点右轮编码器读数作为新位置零点 */
+                PID_Init(&g_yaw_pid, 0.35f, 0.0f, 0.08f, 100.0f, -20.0f, 20.0f); /* 清除角度环上一段历史量 */
+                PID_Init(&g_speed_pid, 0.45f, 0.10f, 0.01f, 50.0f, 0.0f, 55.0f); /* 清除位置环上一段历史量 */
+                state = TASK6_STATE_STRAIGHT_CD;        /* 转入C到D双环直行状态 */
+                printf("task6: straight CD\r\n");     /* 通过串口提示开始C到D直行 */
+            } else {                                    /* 当前刚完成D到A弧线 */
+                Motor_Disable();                        /* 回到A点后立即关闭电机 */
+                state = TASK6_STATE_FINISHED;           /* 转入任务完成停车状态 */
+                printf("task6: arrived A\r\n");       /* 通过串口提示整圈任务完成 */
+            }                                           /* 弧线结束后的状态切换完成 */
+            return;                                     /* 状态切换后结束本控制周期 */
+        }                                               /* 弧线结束判断处理完成 */
 
-        if (++print_div >= 20) {                         /* 每20个控制周期打印一次调试信息 */
-            print_div = 0;                               /* 清零打印分频计数器 */
-            printf("task6 state:%d err:%f angle:%f speed:%d,%d\r\n", state, err, curve_angle, left, right); /* 打印状态、循迹误差、弯道角度和左右轮速度 */
-        }                                               /* 调试打印处理结束 */
-    } else if (state == 6 || state == 7) {               /* 状态6或7：循迹丢线后继续按原来的转弯趋势补转 */
-        Motor_Enable();                                  /* 保持电机使能 */
-        Motor_SetSpeed(last_track_left, last_track_right); /* 使用出弯前末段平均速度继续转弯 */
-        turn_hold_count++;                               /* 出弯补转计数加1 */
+        line_error = IR_GetError(ir_value);             /* 用八路加权结果计算黑线左右位置误差 */
+        line_out = PID_Calc(&g_ir_pid, line_error, 0.0f); /* 用灰度位置误差计算巡线PID输出 */
+        track_diff = line_diff_gain * line_out * fabsf(line_out); /* 对大误差进行非线性差速增强 */
+        if (track_diff > max_track_diff) track_diff = max_track_diff; /* 限制向一个方向的最大差速 */
+        if (track_diff < -max_track_diff) track_diff = -max_track_diff; /* 限制向另一方向的最大差速 */
+        left_cmd = track_base_speed + (int16_t)track_diff; /* 按当前实测符号计算正面所见左轮速度 */
+        right_cmd = track_base_speed - (int16_t)track_diff; /* 按当前实测符号计算正面所见右轮速度 */
+        if (left_cmd < motor_min_speed) left_cmd = motor_min_speed; /* 限制左轮最低前进速度 */
+        if (left_cmd > motor_max_speed) left_cmd = motor_max_speed; /* 限制左轮最高前进速度 */
+        if (right_cmd < motor_min_speed) right_cmd = motor_min_speed; /* 限制右轮最低前进速度 */
+        if (right_cmd > motor_max_speed) right_cmd = motor_max_speed; /* 限制右轮最高前进速度 */
+        Motor_Enable();                                 /* 确保巡线期间电机驱动保持使能 */
+        Motor_SetSpeed(left_cmd, right_cmd);             /* 按正面所见左轮和右轮顺序输出巡线差速 */
 
-        if (turn_hold_count >= turn_hold_ticks) {        /* 补转时间达到约0.5s后 */
-            turn_hold_count = 0;                         /* 清零补转计数器 */
-            black_line_count = 0;                        /* 清零黑线确认计数 */
-            no_line_count = 0;                           /* 清零丢线确认计数 */
-            curve_slow_flag = 0;                         /* 清零弯道末期降速标志 */
+        if (++print_div >= 20U) {                       /* 每二百毫秒输出一次巡线调试数据 */
+            print_div = 0U;                             /* 清零串口输出分频计数 */
+            printf("task6:S%u line=%.2f diff=%.2f pwm=%d,%d\r\n", (unsigned int)state, line_error, track_diff, left_cmd, right_cmd); /* 输出灰度误差和正面所见左右轮命令 */
+        }                                               /* 巡线调试输出处理结束 */
+    } else {                                            /* 捕获理论上不应出现的异常状态 */
+        Motor_Disable();                                /* 异常状态下立即关闭电机 */
+        state = TASK6_STATE_FINISHED;                   /* 锁定到安全停车状态 */
+    }                                                   /* task6运行状态分支结束 */
+}                                                       /* A到B到C到D再回A的控制状态机结束 */
 
-            if (state == 6) {                            /* 如果结束的是第一次出弯补转 */
-                Motor_ResetLeftEncoder();                /* 第二次直行开始前清零左轮编码器 */
-                Motor_ResetRightEncoder();               /* 第二次直行开始前清零右轮编码器 */
-                if (g_imu_data_valid) {                  /* 如果当前陀螺仪数据有效 */
-                    g_yaw_target = g_imu_ypr[0];         /* 把补转后的车身方向作为新的直行目标 */
-                }                                        /* 当前方向记录结束 */
-                PID_Init(&g_yaw_pid, 0.35f, 0.0f, 0.08f, /* 重新初始化角度环PID，清除上一段积分和微分记忆 */
-                         100.0f, -20.0f, 20.0f);        /* 设置角度环PID积分限幅和输出限幅 */
-                PID_Init(&g_speed_pid, 0.45f, 0.1f, 0.01f, /* 重新初始化速度环PID，清除上一段积分和微分记忆 */
-                         50.0f, 5.0f, 60.0f);           /* 设置速度环PID积分限幅和输出限幅 */
-                state = 3;                               /* 进入第二次直线行驶 */
-                printf("task6: gyro straight 2\r\n");   /* 串口打印当前进入第二次直行 */
-            } else {                                     /* 如果结束的是第二次出弯补转 */
-                Motor_Disable();                         /* 关闭电机，车辆停车 */
-                state = 5;                               /* 进入任务完成状态 */
-                printf("task6 done\r\n");               /* 串口打印任务完成 */
-            }                                           /* 出弯补转后的状态切换结束 */
-        }                                               /* 补转时间判断结束 */
-    } else {                                            /* 其他状态，包括任务完成状态 */
-        Motor_Disable();                                /* 保持电机关闭 */
-    }                                                   /* task6状态判断结束 */
-}                                                       /* task6函数结束 */
-
-
-
-
+void task6_reset(void)                                  /* 定义主程序调用的task6复位接口 */
+{                                                       /* task6复位接口开始 */
+    g_task6_reset_request = 1U;                         /* 请求task6在下一次调用时完整初始化 */
+    Motor_Disable();                                    /* 状态切换瞬间先关闭电机确保安全 */
+}                                                       /* task6复位接口结束 */
 
 
 
@@ -1000,7 +1010,6 @@ void task7(void)
     //角度环PID控制
     static uint8_t task1_state = 0;
     const float target_dist   = 100.0f;
-    static int16_t base_speed = 25;
     static float turn_out = 0;
     static uint8_t print_div = 0;
      static float speed_out = 0.0f;
@@ -1028,10 +1037,7 @@ void task7(void)
     if(!g_imu_data_valid)return;
 
     float current_yaw = g_imu_ypr[0];
-    float err = Yaw_Error(g_yaw_target,current_yaw);
-
-
-    turn_out = PID_Calc(&g_yaw_pid, err, 0.0f);
+    turn_out = PID_Calc(&g_yaw_pid, g_yaw_target, current_yaw);
 
 
     float current_position = Motor_GetLeftEncoderPosition() / pulse_per_cm;
