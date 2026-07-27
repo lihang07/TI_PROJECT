@@ -15,6 +15,8 @@
 
 #define PI 3.14159
 #define SEARCH_SPEED 10
+#define WHEEL_C PI*6.5f
+#define TURN_SPEED 15
 //定义任务状态结构体
 typedef enum 
 {
@@ -84,6 +86,7 @@ void task8(void);
 
 
 PID_t g_speed_pid;         /* 速度闭环PID结构体 */
+PID_t g_speed_pid_right;   /* 右轮速度闭环PID结构体 */
 PID_t g_yaw_pid;         /* 陀螺仪闭环PID结构体 */
 PID_t g_ir_pid;         /* 循迹闭环PID结构体 */
 
@@ -92,7 +95,7 @@ static volatile uint32_t TIMA0_count = 0;
 //==========  IMU全局数据区（主循环读取，各任务共享） ==========//
 static float g_imu_ypr[3] = {0};        /* 姿态角 [yaw, pitch, roll]，单位：度 */
 static float g_imu_gyro[3] = {0};       /* 陀螺仪角速度 [gx, gy, gz]，单位：度/秒 */
-static uint8_t g_imu_data_valid = 0;    /* 数据有效标志：1=有效，0=无效 */
+static int g_imu_data_valid = 1;
 static int8_t g_imu_status = 0;         /* IMU状态：0=正常，-2=校准中，其他=错误 */
 static volatile uint8_t g_imu_ready = 0; /* IMU更新标志：1=有新数据待读取，由定时器中断置位 */
 static uint32_t g_imu_last_tick = 0;     /* 上次IMU读取时的TIMA0_count，用于计算真实dt */
@@ -119,6 +122,7 @@ int main(void)
     OLED_ColorTurn(0);
     OLED_DisplayTurn(0);
     IMU_init();
+    delay_ms(100);
     OLED_Clear();
     OLED_Refresh();
 
@@ -170,7 +174,7 @@ int main(void)
                 task4();
                 break;
             case(status_task4):
-                task5();
+                task2();
                 break;
 
         }
@@ -243,7 +247,36 @@ void stop(void)
 
 void task2(void)
 {
+    static uint8_t task2_state = 0;
+    static float speed_target_P = 35.0f;
+    static float speed_err = 0.0f;
+    static float speed_left = 0.0f;
+    static float speed_right = 0.0f;
+    static float speed_out_P = 0.0f;
+    static float speed_out_E = 0.0f;
 
+    if(task2_state == 0){
+        Motor_ResetLeftEncoder();
+        Motor_ResetRightEncoder();
+        Motor_Enable();
+        task2_state = 1;
+        PID_Init(&g_speed_pid, 0.3f, 0.1f, 0.0f, 100, 230, 80*23);
+    }
+
+    speed_left = Motor_GetLeftEncoderSpeed();
+    speed_right = 0;//Motor_GetRightEncoderSpeed();
+    float current_speed_E = (speed_left + speed_right) ;//* 0.5f;
+    float speed_target_E = speed_target_P * 23.0f; 
+    
+    speed_out_E = PID_Calc(&g_speed_pid, speed_target_E, current_speed_E);
+
+    if(speed_out_E > 80*23.0f)speed_out_E = 80*23.0f;
+    if(speed_out_E < 10*23.0f)speed_out_E = 10*23.0f;
+    speed_out_P = speed_out_E/23.0f;
+    
+    Motor_SetSpeed(speed_out_P,speed_out_P);
+    printf("out:%.2f,%.2f,%.2f\r\n",speed_target_E,speed_out_P,current_speed_E);
+    delay_ms(10);
 }
 
 
@@ -312,22 +345,45 @@ void task4(void)
     //任务3：交叉环循迹控制
     static uint8_t task3_state = 0;             //任务3 状态机
     static uint8_t print_div = 0;               //打印次数计数器
-    static float speed_target = 20.0f;        //设置基础速度
     static uint8_t task3_runing_state = 0;    //任务3 运行状态
+    static uint8_t ir_lose_count = 0;           //丢线次数计数器
+    
+    static float speed_target = 20.0f;        //设置基础速度
+    static float turn_out = 0.0f;               //转向系数
+    static float speed_left = 0.0f;             //左轮速度
+    static float speed_right = 0.0f;            //右轮速度
+    static int32_t current_dist = 0;            //当前距离
+    static int32_t current_pos = 0;             //当前位置
+
+    static float current_yaw = 0.0f;            //当前角度
+    static float turn_start_yaw =0.0f;
+    static float turn_end_yaw = 0.0f;
+
+    const float pulse_per_cm  = (ENCODER_PPR * 28.0f) / WHEEL_C;
+    const float target_dist1   = 138.0f;     /* 目标距离(cm) */
+    static const float ir_target = 0.0f;      //IR目标值
+
+    
+    
+    
 
     if(task3_state == 0){
         //初始化
         Motor_ResetLeftEncoder();
         Motor_ResetRightEncoder();
-        IMU_init();
+      //  IMU_init();不用初始化
+      
+        delay_ms(500);
         Motor_Enable();
         task3_state = 1;
         if(g_imu_data_valid){//如果已经初始化陀螺仪，则闭环目标为当前角度
             g_yaw_target = g_imu_ypr[0];
+            printf("g_yaw_target:%f\r\n",g_imu_ypr[0]);
             } else {
                 g_yaw_target = 0.0f;
         }
         PID_Init(&g_yaw_pid, 0.45f, 0.0f, 0.1f, 100, -30, 30);
+        PID_Init(&g_ir_pid, 3.5f, 0.03f, 0.5f, 100, -30, 30);
     }
    
     if(task3_state == 1){
@@ -340,23 +396,138 @@ void task4(void)
           状态6：姿态调整*/
 
 
-
+        IR_Read(ir);
         if(task3_runing_state == 0){
             //状态1：直线行驶，有循迹信号时切换状态
-            float current_yaw = g_imu_ypr[0];
+            current_yaw = g_imu_ypr[0];
             float err = Yaw_Error(g_yaw_target,current_yaw);
-            printf("current_yaw:%f err:%f\r\n",current_yaw,err);   
-            delay_ms(1);
+            //printf("current_yaw:%f err:%f\r\n",current_yaw,err);  
+            
+            turn_out = PID_Calc(&g_yaw_pid, err, 0.0f);
+
+            speed_left = speed_target - turn_out;
+            speed_right = speed_target + turn_out;
+
+            if(speed_left > 70)speed_left = 70;
+            if(speed_left < 10)speed_left = 10;
+            if(speed_right > 70)speed_right = 70;
+            if(speed_right < 10)speed_right = 10;
+
+            Motor_SetSpeed(speed_left,speed_right);
+
+            //判断状态和过线保护
+            current_pos = (Motor_GetLeftEncoderPosition() + Motor_GetRightEncoderPosition()) / 2;
+            current_dist = current_pos * WHEEL_C / 340  ;
+            //printf("current_dist:%d\r\n",current_dist);
+            
+            IR_Read(ir);
+            
+            if(IR_GetSensorCount(ir) > 0){
+                ir_lose_count = 0;//切换到状态1前清零丢线计数
+                task3_runing_state = 1;
+                turn_start_yaw = g_imu_ypr[0];
+                return ;
+            }
+            
+            if (current_dist > target_dist1){//超距，判断是否有巡线信号
+                
+                Motor_TurnRight(TURN_SPEED);//右转
+                
+                if(IR_GetSensorCount(ir) == 0){     
+                
+                    if(Timer_count >last_Timer_Count )
+                        {
+                            last_Timer_Count = Timer_count;
+                            ir_lose_count++;
+                            if(ir_lose_count >100){//超时，判定丢线
+                                Motor_Disable();
+                            }
+                        }
+                  
+                } else {
+                    ir_lose_count = 0;
+                    task3_runing_state = 1;
+                    turn_start_yaw = g_imu_ypr[0];
+                }
+
+                
+            }
+            
+            
+
+
 
         }
         else if(task3_runing_state == 1){
             //状态2：循迹行驶，连续无循迹信号时切换状态
+            
+            IR_Read(ir);
+
+            //========== 丢线保护 ==========//
+            if(IR_GetSensorCount(ir) == 0){         //无循迹信号，开始丢线计数
+                turn_end_yaw = g_imu_ypr[0];        //记录丢线时角度
+                if(Timer_count > last_Timer_Count){
+                    last_Timer_Count = Timer_count;
+                    ir_lose_count++;
+                    if(ir_lose_count > 30){//连续丢线超时，切换至姿态调整状态
+                        ir_lose_count = 0;
+                        task3_runing_state = 2;
+                        // 需要添加的静态变量：static float lose_start_yaw = 0.0f; //丢线起始角度，在进入状态2时记录
+                        // lose_start_yaw = g_imu_ypr[0];
+                        return;
+                    }
+                }
+                // 丢线时保持当前速度继续行驶，等待信号恢复
+                return;
+            } else {
+                ir_lose_count = 0;//有信号，清零丢线计数器
+            }
+
+            //进入循迹
+            float ir_err = IR_GetError(ir);
+            
+            turn_out = PID_Calc(&g_ir_pid, 0.0f, ir_err);
+
+            speed_left = speed_target - turn_out;
+            speed_right = speed_target + turn_out;
+
+            if(speed_left > 70)speed_left = 70;
+            if(speed_left < 10)speed_left = 10;
+            if(speed_right > 70)speed_right = 70;
+            if(speed_right < 10)speed_right = 10;
+
+
+            Motor_SetSpeed(speed_left,speed_right);
+
+
         }
         else if(task3_runing_state == 2){
             //状态3：姿态调整，；
         }
 
     }
+//=================调试==================//
+    if(Timer_count >last_Timer_Count )
+    {
+        last_Timer_Count = Timer_count;
+        print_div++;
+    }
+
+    //数据输出
+    if (print_div >= 20) {
+        print_div = 0;
+        
+        //输出调试
+        printf("out:%f,%f,%f,%f,%f\r\n",g_yaw_target,current_yaw,speed_left,speed_right,turn_out);
+
+        //
+        OLED_ShowString(0, 0, (uint8_t *)"yaw:", 16);
+        OLED_ShowFloat(25, 0, current_yaw, 3, 2, 16);
+        OLED_ShowString(0, 16, (uint8_t *)"target:", 16);
+        OLED_ShowFloat(25, 16, turn_start_yaw, 3, 2, 16);
+        OLED_Refresh();
+    }
+
 
 }
 
@@ -424,6 +595,7 @@ void task5(void)
         OLED_Refresh();
     }
 }
+
 void task1(void)
 {
     static uint8_t state = 0;               /* 状态机: 0=初始化, 1=运行中, 2=完成 */
@@ -439,7 +611,7 @@ void task1(void)
         Motor_ResetRightEncoder();          /* 重置右编码器位置 */
         Motor_Enable();                     /* 使能电机 */
         IMU_init();                         //初始化陀螺仪
-        
+        delay_ms(100);
         if(g_imu_data_valid){//如果已经初始化陀螺仪，则闭环目标为当前角度
             g_yaw_target = g_imu_ypr[0];
         } else {
@@ -463,7 +635,7 @@ void task1(void)
     static float turn_out = 0.0f;
     static float speed_out = 0.0f;
     static const int16_t base_speed = 0;
-    const float target_dist   = 100.0f;     /* 目标距离(cm) */
+    
 
     float current_yaw = g_imu_ypr[0];
     float yaw_err = Yaw_Error(g_yaw_target,current_yaw);
