@@ -131,6 +131,7 @@ int main(void)
             break;
         }
     }
+#endif
 }
 
 /* TIMG7 每 10 ms 更新一次左右编码器的位置和速度。 */
