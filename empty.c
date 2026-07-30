@@ -1,6 +1,7 @@
 #include "ti_msp_dl_config.h"
 #include "mylib/Motor.h"
 #include "mylib/key.h"
+#include "mylib/zdt_x42s_pulse.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -43,6 +44,27 @@
 /* 正数能让小车前进就保持 1；如果正数让小车后退，就改成 -1。 */
 #define RING_FORWARD_SIGN          1
 
+/*
+ * ==================== X42S pulse-interface bench test ====================
+ *
+ * Set ZDT_TEST_MODE to 1 before wiring verification.  The test keeps the
+ * original vehicle task loop intact under #else, then automatically drives
+ * the X42S between +ZDT_TEST_MOVE_PULSE and -ZDT_TEST_MOVE_PULSE.
+ *
+ * Signal mapping is supplied by SysConfig through zdt_x42s_pulse.h:
+ * PB14 -> STP/PUL, PA7 -> DIR, PB1 -> EN.
+ *
+ * Start with the small values below.  The software limit is intentionally
+ * wider than the test travel so the mechanism cannot continue moving if the
+ * test state is changed later.  Set the mode back to 0 for normal tasks.
+ */
+#define ZDT_TEST_MODE               1
+#define ZDT_TEST_MOVE_PULSE         10
+#define ZDT_TEST_LIMIT_PULSE        20
+#define ZDT_TEST_MAX_RATE_HZ        400U
+#define ZDT_TEST_ACCEL_PULSE_S2     1000U
+#define ZDT_TEST_HOLD_MS            1000U
+
 /* ==================== 主任务状态 ==================== */
 
 typedef enum {
@@ -69,6 +91,7 @@ static SystemState_t state = status_stop;
 
 /* TIMA0 每 1 ms 加 1，task2 用它保证固定的 5 ms 控制周期。 */
 static volatile uint32_t g_ms_tick = 0U;
+static ZDT_X42S_Pulse g_zdt_x42s;
 
 /* task2 当前所在的环形路段。 */
 static RingState_t g_ring_state = RING_NOT_STARTED;
@@ -99,6 +122,34 @@ int main(void)
     NVIC_EnableIRQ(TIMER_TICK_INST_INT_IRQN);
     __enable_irq();
 
+#if ZDT_TEST_MODE
+    /*
+     * This branch is deliberately independent of the key scanner and task
+     * state machine.  It verifies only the STP/DIR/EN electrical interface.
+     */
+    ZDT_X42S_Pulse_Init(&g_zdt_x42s,
+                         -ZDT_TEST_LIMIT_PULSE,
+                         ZDT_TEST_LIMIT_PULSE,
+                         ZDT_TEST_MAX_RATE_HZ,
+                         ZDT_TEST_ACCEL_PULSE_S2,
+                         0);
+    ZDT_X42S_Pulse_Enable(&g_zdt_x42s, true);
+
+    /* Wait one second after reset, then alternate direction once per second. */
+    uint32_t next_change_ms = g_ms_tick + ZDT_TEST_HOLD_MS;
+    bool move_positive = true;
+    ZDT_X42S_Pulse_SetTarget(&g_zdt_x42s, ZDT_TEST_MOVE_PULSE);
+
+    while (1) {
+        if ((int32_t)(g_ms_tick - next_change_ms) >= 0) {
+            move_positive = !move_positive;
+            ZDT_X42S_Pulse_SetTarget(
+                &g_zdt_x42s,
+                move_positive ? ZDT_TEST_MOVE_PULSE : -ZDT_TEST_MOVE_PULSE);
+            next_change_ms += ZDT_TEST_HOLD_MS;
+        }
+    }
+#else
     while (1) {
         /* key_read 会记住最后按下的按键；KEY2 对应 task2 环形循迹。 */
         key_status = key_read();
@@ -154,6 +205,10 @@ void TIMA0_IRQHandler(void)
 
     /* 系统毫秒计数加 1。 */
     ++g_ms_tick;
+#if ZDT_TEST_MODE
+    /* Advance the acceleration, position limit and PWM pulse generator. */
+    ZDT_X42S_Pulse_Update1ms(&g_zdt_x42s);
+#endif
 }
 
 /* 停止状态让两个电机保持停止，并允许下次重新开始 task2。 */
