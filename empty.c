@@ -4,6 +4,47 @@
 #include "mylib/key.h"
 #include <stdint.h>
 
+/* ==================== 环形循迹参数 ==================== */
+
+/* task2 每隔 5 ms 计算一次循迹。 */
+#define RING_PERIOD_MS             5U
+
+/* AB 从 24 加速到 48，BC 保持 48，CD 从 48 减速到 36，DA 保持 36。 */
+#define RING_START_SPEED           24.0f
+#define RING_HIGH_SPEED            48.0f
+#define RING_LOW_SPEED             36.0f
+
+/* 丢线后使用 18 的低速度寻找黑线。 */
+#define RING_SEARCH_SPEED          18
+
+/* 循迹 PD 参数。KP 决定转向强度，KD 用于减小左右摆动。 */
+#define RING_KP                    5.0f
+#define RING_KD                    7.0f
+
+/* 转向修正最大为 24，而且每 5 ms 最多改变 2，防止突然急转。 */
+#define RING_CORRECTION_MAX        24.0f
+#define RING_CORRECTION_STEP       2.0f
+
+/* 至少六个探头连续看到黑色 25 ms，才认为检测到了 A 点横线。 */
+#define RING_MARK_COUNT            6U
+#define RING_MARK_CONFIRM_MS       25U
+
+/* 丢线 50 ms 内保持原速度；丢线达到 400 ms 后停车。 */
+#define RING_LOST_HOLD_MS          50U
+#define RING_LOST_STOP_MS          400U
+
+/*
+ * 必须实车标定：小车完整行驶一圈时，
+ * (左编码器绝对值 + 右编码器绝对值) / 2 的结果。
+ * 6000 只是临时占位值，正式使用前必须换成实测值。
+ */
+#define RING_LAP_PULSES            6000L
+
+/* 正数能让小车前进就保持 1；如果正数让小车后退，就改成 -1。 */
+#define RING_FORWARD_SIGN          1
+
+/* ==================== 主任务状态 ==================== */
+
 typedef enum {
     status_stop = 0,
     status_task1,
@@ -41,6 +82,34 @@ int main(void)
     NVIC_EnableIRQ(TIMER_TICK_INST_INT_IRQN);
     __enable_irq();
 
+#if ZDT_TEST_MODE
+    /*
+     * This branch is deliberately independent of the key scanner and task
+     * state machine.  It verifies only the STP/DIR/EN electrical interface.
+     */
+    ZDT_X42S_Pulse_Init(&g_zdt_x42s,
+                         -ZDT_TEST_LIMIT_PULSE,
+                         ZDT_TEST_LIMIT_PULSE,
+                         ZDT_TEST_MAX_RATE_HZ,
+                         ZDT_TEST_ACCEL_PULSE_S2,
+                         0);
+    ZDT_X42S_Pulse_Enable(&g_zdt_x42s, true);
+
+    /* Wait one second after reset, then alternate direction once per second. */
+    uint32_t next_change_ms = g_ms_tick + ZDT_TEST_HOLD_MS;
+    bool move_positive = true;
+    ZDT_X42S_Pulse_SetTarget(&g_zdt_x42s, ZDT_TEST_MOVE_PULSE);
+
+    while (1) {
+        if ((int32_t)(g_ms_tick - next_change_ms) >= 0) {
+            move_positive = !move_positive;
+            ZDT_X42S_Pulse_SetTarget(
+                &g_zdt_x42s,
+                move_positive ? ZDT_TEST_MOVE_PULSE : -ZDT_TEST_MOVE_PULSE);
+            next_change_ms += ZDT_TEST_HOLD_MS;
+        }
+    }
+#else
     while (1) {
         /* KEY2 选择 task2，执行黑色环形路线循迹。 */
         key_status = key_read();
@@ -75,6 +144,10 @@ void TIMA0_IRQHandler(void)
     DL_TimerA_clearInterruptStatus(
         TIMER_TICK_INST, DL_TIMERA_INTERRUPT_LOAD_EVENT);
     ++g_ms_tick;
+#if ZDT_TEST_MODE
+    /* Advance the acceleration, position limit and PWM pulse generator. */
+    ZDT_X42S_Pulse_Update1ms(&g_zdt_x42s);
+#endif
 }
 
 /* 停车，并让 task2 下次进入时从头开始。 */
