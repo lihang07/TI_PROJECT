@@ -4,8 +4,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* 若黑线时传感器输出高电平，把 0U 改为 1U。 */
-#define LINE_SENSOR_BLACK_LEVEL 0U
+/*
+ * 商家八路数字灰度模块：黑线时数字输出为高电平，因此设为 1U。
+ * G1～G8 已按从车头前方看过去的左到右顺序连接。
+ * 若实车验证黑线时输出为低电平，只需把本行改回 0U。
+ */
+#define LINE_SENSOR_BLACK_LEVEL 1U
 
 /* task2 中每隔 5 ms 调用一次各循迹函数。 */
 #define RING_TRACK_PERIOD_MS 5U
