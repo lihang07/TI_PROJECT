@@ -1,338 +1,272 @@
-#include "ti_msp_dl_config.h"
 #include "mylib/find.h"
+
 #include "mylib/Motor.h"
+#include "ti_msp_dl_config.h"
 
-/* ==================== 内部变量 ==================== */
+/* ==================== 实车调节参数 ==================== */
 
-/* 传感器位置权重表（从 G1 到 G8） */
-static const int8_t ir_weight[IR_NUM] = {
-    IR_WEIGHT_G1,   /* G1: -7 */
-    IR_WEIGHT_G2,   /* G2: -5 */
-    IR_WEIGHT_G3,   /* G3: -3 */
-    IR_WEIGHT_G4,   /* G4: -1 */
-    IR_WEIGHT_G5,   /* G5:  1 */
-    IR_WEIGHT_G6,   /* G6:  3 */
-    IR_WEIGHT_G7,   /* G7:  5 */
-    IR_WEIGHT_G8    /* G8:  7 */
+#define LAP_PULSES                  6000L   /* 一圈平均编码器脉冲数，实车测量后修改。 */
+#define START_SPEED                  24.0f   /* A点起步速度。 */
+#define HIGH_SPEED                   48.0f   /* AB加速后的最高速度。 */
+#define LOW_SPEED                    36.0f   /* CD减速后的最低速度。 */
+#define TRACK_KP                     5.0f    /* 偏离黑线时的转向力度。 */
+#define TRACK_KD                     7.0f    /* 抑制车头快速摆动。 */
+#define FORWARD_SIGN                 1       /* 正速度后退时改为 -1。 */
+
+/* 每段直线的前、后15%保持恒速，中间70%才以固定斜率变速。 */
+#define SPEED_RAMP_START_PERCENT     15L
+#define SPEED_RAMP_END_PERCENT       85L
+
+/* ==================== 内部保护参数 ==================== */
+
+#define SENSOR_COUNT                 8U
+#define SEARCH_SPEED                 18
+#define CORRECTION_MAX               24.0f
+#define CORRECTION_STEP              2.0f
+#define MARK_SENSOR_COUNT            6U
+#define MARK_CONFIRM_MS              25U
+#define LOST_HOLD_MS                 50U
+#define LOST_STOP_MS                 400U
+
+/* H1～H8：从车头前方看过去，依次为左到右。 */
+static const int8_t g_sensor_weight[SENSOR_COUNT] = {
+    -7, -5, -3, -1, 1, 3, 5, 7
 };
 
-/* 上一次有效位置（用于黑线丢失时保持） */
-static int16_t g_last_position = 0;
+/* 循迹模块内部共享的数据；task2只调用接口，不直接访问这些变量。 */
+typedef struct {
+    RingTrackState_t state;
+    float raw_position;
+    float filtered_position;
+    float last_position;
+    float base_speed;
+    float correction;
+    int16_t left_speed;
+    int16_t right_speed;
+    uint8_t black_count;
+    int32_t distance;
+    uint16_t lost_ms;
+    uint16_t mark_ms;
+    bool left_start_mark;
+} RingTrackControl_t;
 
-/* ==================== 第1层：传感器数据读取 ==================== */
+static RingTrackControl_t g_track;
 
-/*
- * 简介：读取8路循迹传感器数据到数组
- * 参数：ir - 存储传感器数据的数组（长度至少为 IR_NUM）
- * 说明：ir[i] = 1 表示检测到黑线，ir[i] = 0 表示检测到白线
- *       注意：传感器检测到黑线时输出高电平，与 ir[i] 逻辑一致
- */
-void IR_Read(uint8_t *ir)
+static float limit_float(float value, float minimum, float maximum)
 {
-    /* DL_GPIO_readPins 读取指定端口的指定引脚电平 */
-    ir[0] = (DL_GPIO_readPins(XG_G1_PORT, XG_G1_PIN) ? 1 : 0);
-    ir[1] = (DL_GPIO_readPins(XG_G2_PORT, XG_G2_PIN) ? 1 : 0);
-    ir[2] = (DL_GPIO_readPins(XG_G3_PORT, XG_G3_PIN) ? 1 : 0);
-    ir[3] = (DL_GPIO_readPins(XG_G4_PORT, XG_G4_PIN) ? 1 : 0);
-    ir[4] = (DL_GPIO_readPins(XG_G5_PORT, XG_G5_PIN) ? 1 : 0);
-    ir[5] = (DL_GPIO_readPins(XG_G6_PORT, XG_G6_PIN) ? 1 : 0);
-    ir[6] = (DL_GPIO_readPins(XG_G7_PORT, XG_G7_PIN) ? 1 : 0);
-    ir[7] = (DL_GPIO_readPins(XG_G8_PORT, XG_G8_PIN) ? 1 : 0);
+    if (value > maximum) return maximum;
+    if (value < minimum) return minimum;
+    return value;
 }
 
-/* ==================== 第1层：位置计算 ==================== */
-
-/*
- * 简介：计算黑线位置（加权平均法）
- * 参数：ir - 传感器数据数组
- * 返回：黑线位置值，范围 -7 ~ +7
- *       负数=线偏左，正数=线偏右，0=线在正中间
- * 算法：position = Σ(weight[i] × ir[i]) / Σ(ir[i])
- *       当所有传感器都没有检测到黑线时，保持上一次的有效位置
- * 示例：若 G3、G4 检测到黑线 → position = (-3×1 + -1×1) / 2 = -2
- */
-float IR_GetPosition(uint8_t *ir)
+static int32_t abs32(int32_t value)
 {
-    int16_t weighted_sum = 0;   /* 加权和 */
-    uint8_t active_count = 0;   /* 检测到黑线的传感器数量 */
+    return (value < 0) ? -value : value;
+}
 
+static uint8_t sensor_is_black(uint32_t port_value, uint32_t pin_mask)
+{
+    uint8_t level = ((port_value & pin_mask) != 0U) ? 1U : 0U;
+    return (level == LINE_SENSOR_BLACK_LEVEL) ? 1U : 0U;
+}
+
+/* 在一段路程的指定区间内，按固定斜率从from_speed变到to_speed。 */
+static float get_ramp_speed(int32_t distance, int32_t segment_start,
+                            int32_t segment_end, float from_speed,
+                            float to_speed)
+{
+    int32_t segment_length = segment_end - segment_start;
+    int32_t ramp_start = segment_start +
+        (segment_length * SPEED_RAMP_START_PERCENT) / 100L;
+    int32_t ramp_end = segment_start +
+        (segment_length * SPEED_RAMP_END_PERCENT) / 100L;
+    float progress;
+
+    if (distance <= ramp_start) return from_speed;
+    if (distance >= ramp_end) return to_speed;
+
+    progress = (float)(distance - ramp_start) /
+               (float)(ramp_end - ramp_start);
+    return from_speed + (to_speed - from_speed) * progress;
+}
+
+void RingTrack_Init(void)
+{
+    g_track.state = RING_TRACK_IDLE;
+    g_track.left_start_mark = false;
+}
+
+void RingTrack_Start(void)
+{
+    Motor_ResetLeftEncoder();
+    Motor_ResetRightEncoder();
+
+    g_track.state = RING_TRACK_AB;
+    g_track.raw_position = 0.0f;
+    g_track.filtered_position = 0.0f;
+    g_track.last_position = 0.0f;
+    g_track.base_speed = START_SPEED;
+    g_track.correction = 0.0f;
+    g_track.left_speed = 0;
+    g_track.right_speed = 0;
+    g_track.black_count = 0U;
+    g_track.distance = 0L;
+    g_track.lost_ms = 0U;
+    g_track.mark_ms = 0U;
+    g_track.left_start_mark = false;
+    Motor_Enable();
+}
+
+void RingTrack_ReadSensors(void)
+{
+    const uint8_t black[SENSOR_COUNT] = {
+        sensor_is_black(DL_GPIO_readPins(XG_G1_PORT, XG_G1_PIN), XG_G1_PIN),
+        sensor_is_black(DL_GPIO_readPins(XG_G2_PORT, XG_G2_PIN), XG_G2_PIN),
+        sensor_is_black(DL_GPIO_readPins(XG_G3_PORT, XG_G3_PIN), XG_G3_PIN),
+        sensor_is_black(DL_GPIO_readPins(XG_G4_PORT, XG_G4_PIN), XG_G4_PIN),
+        sensor_is_black(DL_GPIO_readPins(XG_G5_PORT, XG_G5_PIN), XG_G5_PIN),
+        sensor_is_black(DL_GPIO_readPins(XG_G6_PORT, XG_G6_PIN), XG_G6_PIN),
+        sensor_is_black(DL_GPIO_readPins(XG_G7_PORT, XG_G7_PIN), XG_G7_PIN),
+        sensor_is_black(DL_GPIO_readPins(XG_G8_PORT, XG_G8_PIN), XG_G8_PIN)
+    };
+    int16_t weighted_sum = 0;
+    int32_t left_distance;
+    int32_t right_distance;
     uint8_t i;
-    for (i = 0; i < IR_NUM; i++) {
-        if (ir[i] == 1) {
-            weighted_sum += ir_weight[i];
-            active_count++;
+
+    g_track.black_count = 0U;
+    for (i = 0U; i < SENSOR_COUNT; ++i) {
+        if (black[i] != 0U) {
+            weighted_sum += g_sensor_weight[i];
+            ++g_track.black_count;
         }
     }
 
-    /* 如果没有任何传感器检测到黑线，保持上一次的位置 */
-    if (active_count == 0) {
-        return g_last_position;
+    if (g_track.black_count != 0U) {
+        g_track.raw_position =
+            (float)weighted_sum / (float)g_track.black_count;
     }
 
-    /* 计算加权平均位置 */
-    float position = (float)weighted_sum / (float)active_count;
-
-    /* 保存有效位置 */
-    g_last_position = position;
-
-    return position;
+    left_distance = abs32(Motor_GetLeftEncoderPosition());
+    right_distance = abs32(Motor_GetRightEncoderPosition());
+    g_track.distance = (left_distance + right_distance) / 2L;
 }
 
-/*
- * 简介：获取偏离中心线的偏差值
- * 参数：ir - 传感器数据数组
- * 返回：偏差值（同 IR_GetPosition）
- * 说明：直接调用 IR_GetPosition，封装为语义更清晰的接口
- *       负数=需要左转修正，正数=需要右转修正
- */
-float IR_GetError(uint8_t *ir)
+void RingTrack_UpdateSpeedProfile(void)
 {
-    return IR_GetPosition(ir);
-}
+    const int32_t point_b = (LAP_PULSES * 2442L) / 10000L;
+    const int32_t point_c = LAP_PULSES / 2L;
+    const int32_t point_d = (LAP_PULSES * 7442L) / 10000L;
 
-/*
- * 简介：获取检测到黑线的传感器数量
- * 参数：ir - 传感器数据数组
- * 返回：检测到黑线的传感器个数（0~8）
- */
-uint8_t IR_GetSensorCount(uint8_t *ir)
-{
-    uint8_t count = 0;
-    uint8_t i;
-
-    for (i = 0; i < IR_NUM; i++) {
-        if (ir[i] == 1) {
-            count++;
-        }
+    if (g_track.distance < point_b) {
+        /* AB：前15%保持24，中间70%匀速加至48，后15%保持48。 */
+        g_track.state = RING_TRACK_AB;
+        g_track.base_speed = get_ramp_speed(
+            g_track.distance, 0L, point_b, START_SPEED, HIGH_SPEED);
+    } else if (g_track.distance < point_c) {
+        /* BC弧线全程保持48。 */
+        g_track.state = RING_TRACK_BC;
+        g_track.base_speed = HIGH_SPEED;
+    } else if (g_track.distance < point_d) {
+        /* CD：前15%保持48，中间70%匀速降至36，后15%保持36。 */
+        g_track.state = RING_TRACK_CD;
+        g_track.base_speed = get_ramp_speed(
+            g_track.distance, point_c, point_d, HIGH_SPEED, LOW_SPEED);
+    } else {
+        /* DA弧线全程保持36，稳定驶回A点。 */
+        g_track.state = RING_TRACK_DA;
+        g_track.base_speed = LOW_SPEED;
     }
-
-    return count;
 }
 
-/* ==================== 第2层：线状态检测 ==================== */
-
-/*
- * 简介：检查是否所有传感器都检测到黑线
- * 参数：ir - 传感器数据数组
- * 返回：1=全黑，0=非全黑
- * 说明：通常出现在十字路口中心或到达终点标记
- */
-uint8_t IR_IsAllBlack(uint8_t *ir)
+void RingTrack_CalculateSteering(void)
 {
-    uint8_t i;
-    for (i = 0; i < IR_NUM; i++) {
-        if (ir[i] == 0) {
-            return 0;   /* 有一个不黑就不是全黑 */
-        }
-    }
-    return 1;
+    float target;
+    float change;
+
+    /* 新读数只占35%，避免数字量传感器跳变使小车来回摆。 */
+    g_track.filtered_position = 0.65f * g_track.filtered_position +
+                                0.35f * g_track.raw_position;
+    target = TRACK_KP * g_track.filtered_position +
+             TRACK_KD * (g_track.filtered_position - g_track.last_position);
+    g_track.last_position = g_track.filtered_position;
+
+    target = limit_float(target, -CORRECTION_MAX, CORRECTION_MAX);
+    change = limit_float(target - g_track.correction,
+                         -CORRECTION_STEP, CORRECTION_STEP);
+    g_track.correction += change;
+
+    /* 黑线偏左时左轮慢、右轮快；黑线偏右时相反。 */
+    g_track.left_speed = (int16_t)(g_track.base_speed + g_track.correction);
+    g_track.right_speed = (int16_t)(g_track.base_speed - g_track.correction);
+    if (g_track.left_speed > MOTOR_SPEED_MAX) g_track.left_speed = MOTOR_SPEED_MAX;
+    if (g_track.left_speed < MOTOR_SPEED_MIN) g_track.left_speed = MOTOR_SPEED_MIN;
+    if (g_track.right_speed > MOTOR_SPEED_MAX) g_track.right_speed = MOTOR_SPEED_MAX;
+    if (g_track.right_speed < MOTOR_SPEED_MIN) g_track.right_speed = MOTOR_SPEED_MIN;
 }
 
-/*
- * 简介：检查是否所有传感器都检测不到黑线
- * 参数：ir - 传感器数据数组
- * 返回：1=全白，0=非全白
- * 说明：通常出现在完全脱离轨道时
- */
-uint8_t IR_IsAllWhite(uint8_t *ir)
+void RingTrack_OutputMotor(void)
 {
-    uint8_t i;
-    for (i = 0; i < IR_NUM; i++) {
-        if (ir[i] == 1) {
-            return 0;   /* 有一个黑就不是全白 */
-        }
-    }
-    return 1;
+    Motor_SetSpeed(FORWARD_SIGN * g_track.left_speed,
+                   FORWARD_SIGN * g_track.right_speed);
 }
 
-/*
- * 简介：检查是否丢失黑线
- * 参数：ir - 传感器数据数组
- * 返回：1=黑线丢失，0=黑线正常
- * 说明：没有任何传感器检测到黑线即为丢失
- */
-uint8_t IR_IsLineLost(uint8_t *ir)
+bool RingTrack_IsLineLost(void)
 {
-    return IR_IsAllWhite(ir);
+    return g_track.black_count == 0U;
 }
 
-/*
- * 简介：检查是否处于交叉路口
- * 参数：ir - 传感器数据数组
- * 返回：1=处于交叉路口，0=正常路段
- * 说明：当检测到黑线的传感器数量 >= 4 时判定为交叉路口
- *       （可根据实际赛道宽度调整阈值 IR_JUNCTION_THRESHOLD）
- */
-#define IR_JUNCTION_THRESHOLD  4
-
-uint8_t IR_IsAtJunction(uint8_t *ir)
+void RingTrack_HandleLineLost(uint16_t period_ms)
 {
-    uint8_t count = IR_GetSensorCount(ir);
-    return (count >= IR_JUNCTION_THRESHOLD) ? 1 : 0;
-}
+    if (g_track.lost_ms < LOST_STOP_MS) g_track.lost_ms += period_ms;
 
-/*
- * 简介：获取当前循迹状态（综合判断）
- * 参数：ir - 传感器数据数组
- * 返回：当前循迹状态枚举值
- * 说明：按优先级顺序判断：全黑 > 全白 > 交叉路口 > 正常循迹
- */
-IR_Status_t IR_GetStatus(uint8_t *ir)
-{
-    if (IR_IsAllBlack(ir)) {
-        return IR_STATUS_ALL_BLACK;
-    }
-
-    if (IR_IsAllWhite(ir)) {
-        return IR_STATUS_ALL_WHITE;
-    }
-
-    if (IR_IsAtJunction(ir)) {
-        return IR_STATUS_AT_JUNCTION;
-    }
-
-    return IR_STATUS_ON_LINE;
-}
-
-/* ==================== 第3层：PID循迹控制 ==================== */
-
-/*
- * 简介：初始化循迹PID参数
- * 参数：pid  - PID结构体指针
- *       Kp   - 比例系数（建议初始值：2.0 ~ 5.0）
- *       Ki   - 积分系数（建议初始值：0.0 ~ 0.5）
- *       Kd   - 微分系数（建议初始值：1.0 ~ 3.0）
- * 说明：调用后所有内部状态清零，setpoint 默认为 0（黑线在中间）
- */
-void IR_PID_Init(IR_PID_t *pid, float Kp, float Ki, float Kd)
-{
-    pid->Kp = Kp;
-    pid->Ki = Ki;
-    pid->Kd = Kd;
-    pid->setpoint = 0.0f;   /* 目标位置：黑线在中间 */
-    pid->error = 0.0f;
-    pid->last_error = 0.0f;
-    pid->integral = 0.0f;
-    pid->output = 0.0f;
-}
-
-/*
- * 简介：循迹PID计算
- * 参数：pid              - PID结构体指针
- *       current_position - 当前黑线位置（来自 IR_GetPosition）
- * 返回：PID修正输出值（可直接用于 Motor_TurnSmall 的 error 参数）
- * 说明：输出值范围约为 -100 ~ +100
- *       - 负数：需要左转
- *       - 正数：需要右转
- *       - 0：不需要修正
- */
-float IR_PID_Calculate(IR_PID_t *pid, int16_t current_position)
-{
-    /* 计算位置偏差 */
-    pid->error = pid->setpoint - (float)current_position;
-
-    /* 比例项：P = Kp × error */
-    float p_term = pid->Kp * pid->error;
-
-    /* 积分项：I = Ki × ∫error（带积分限幅，防止积分饱和） */
-    pid->integral += pid->error;
-    if (pid->integral > 50.0f) {
-        pid->integral = 50.0f;
-    } else if (pid->integral < -50.0f) {
-        pid->integral = -50.0f;
-    }
-    float i_term = pid->Ki * pid->integral;
-
-    /* 微分项：D = Kd × d(error)/dt */
-    float d_term = pid->Kd * (pid->error - pid->last_error);
-    pid->last_error = pid->error;
-
-    /* 计算总输出 */
-    pid->output = p_term + i_term + d_term;
-
-    return pid->output;
-}
-
-/*
- * 简介：循迹主控函数（一站式循迹控制）
- * 参数：pid        - PID结构体指针
- *       base_speed - 基础速度(0~100)，值越大越快
- * 返回：当前循迹状态
- * 说明：此函数完成以下步骤：
- *       1. 读取8路传感器数据
- *       2. 判断当前循迹状态
- *       3. 若正常循迹：计算位置 → PID修正 → 差速转向
- *       4. 若黑线丢失：保持上次方向缓慢前进尝试找回
- *       5. 若交叉路口：直行通过
- *       6. 若全黑：停止
- *       7. 若全白：停止
- */
-IR_Status_t IR_Track(IR_PID_t *pid, int16_t base_speed)
-{
-    uint8_t ir[IR_NUM];
-
-    /* 步骤1：读取传感器数据 */
-    IR_Read(ir);
-
-    /* 步骤2：判断当前状态 */
-    IR_Status_t status = IR_GetStatus(ir);
-
-    switch (status) {
-    case IR_STATUS_ON_LINE:
-    {
-        /* 正常循迹：计算位置 → PID修正 → 差速转向 */
-        int16_t position = IR_GetPosition(ir);
-        float correction = IR_PID_Calculate(pid, position);
-
-        /* 根据PID输出调整左右轮速度 */
-        int16_t left_speed  = base_speed - (int16_t)correction;
-        int16_t right_speed = base_speed + (int16_t)correction;
-
-        /* 限幅处理 */
-        if (left_speed > 100)  left_speed = 100;
-        if (left_speed < -100) left_speed = -100;
-        if (right_speed > 100)  right_speed = 100;
-        if (right_speed < -100) right_speed = -100;
-
-        Motor_SetSpeed(left_speed, right_speed);
-        break;
-    }
-
-    case IR_STATUS_LINE_LOST:
-    case IR_STATUS_ALL_WHITE:
-    {
-        /* 黑线丢失：降低速度，保持上一次方向缓慢前进 */
-        int16_t search_speed = base_speed / 3;   /* 降低到1/3速度 */
-        if (g_last_position < 0) {
-            /* 上次线偏左，缓慢左转寻找 */
-            Motor_SetSpeed(-search_speed, search_speed);
-        } else if (g_last_position > 0) {
-            /* 上次线偏右，缓慢右转寻找 */
-            Motor_SetSpeed(search_speed, -search_speed);
+    if (g_track.lost_ms <= LOST_HOLD_MS) {
+        RingTrack_OutputMotor();
+    } else if (g_track.lost_ms < LOST_STOP_MS) {
+        if (g_track.filtered_position < 0.0f) {
+            Motor_SetSpeed(FORWARD_SIGN * (-SEARCH_SPEED),
+                           FORWARD_SIGN * SEARCH_SPEED);
         } else {
-            /* 无历史位置，缓慢前进 */
-            Motor_SetSpeed(search_speed, search_speed);
+            Motor_SetSpeed(FORWARD_SIGN * SEARCH_SPEED,
+                           FORWARD_SIGN * (-SEARCH_SPEED));
         }
-        break;
+    } else {
+        Motor_Brake();
+        g_track.state = RING_TRACK_FAULT;
+    }
+}
+
+bool RingTrack_CheckFinish(uint16_t period_ms)
+{
+    if (g_track.black_count < MARK_SENSOR_COUNT) {
+        g_track.mark_ms = 0U;
+        if (g_track.distance > (LAP_PULSES / 20L)) {
+            g_track.left_start_mark = true;
+        }
+        return false;
     }
 
-    case IR_STATUS_AT_JUNCTION:
-    {
-        /* 交叉路口：直行通过 */
-        Motor_SetSpeed(base_speed, base_speed);
-        break;
+    /* 必须已经离开起点，且至少走到预估一圈距离的80%。 */
+    if (!g_track.left_start_mark ||
+        g_track.distance < ((LAP_PULSES * 8L) / 10L)) {
+        return false;
     }
 
-    case IR_STATUS_ALL_BLACK:
-    {
-        /* 全黑：停止（可能到达终点或出错） */
-        Motor_Stop();
-        break;
-    }
+    if (g_track.mark_ms < MARK_CONFIRM_MS) g_track.mark_ms += period_ms;
+    if (g_track.mark_ms < MARK_CONFIRM_MS) return false;
 
-    default:
-        break;
-    }
+    Motor_Brake();
+    g_track.state = RING_TRACK_FINISHED;
+    return true;
+}
 
-    return status;
+void RingTrack_Stop(void)
+{
+    Motor_Brake();
+    g_track.state = RING_TRACK_IDLE;
+}
+
+RingTrackState_t RingTrack_GetState(void)
+{
+    return g_track.state;
 }
