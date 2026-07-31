@@ -17,7 +17,6 @@ typedef enum {
     RING_TRACK_BC,
     RING_TRACK_CD,
     RING_TRACK_DA,
-    RING_TRACK_EMERGENCY_BRAKING,
     RING_TRACK_FINISHED,
     RING_TRACK_FAULT
 } RingTrackState_t;
@@ -40,34 +39,17 @@ void RingTrack_SetBaseSpeed(float speed);
 /* 根据黑线位置计算PD转向修正量。 */
 void RingTrack_CalculateSteering(void);
 
-/* task2专用：按AB/BC/CD/DA预定轨迹前进，红外仅在偏差较大时辅助。 */
-void RingTrack_CalculatePresetSteering(void);
-
-/* task2陀螺仪航向控制：开始时记录零度，运行中按路段目标航向控制。 */
-void RingTrack_GyroReset(float initial_yaw);
-void RingTrack_CalculateGyroSteering(float current_yaw);
-
-/* task2混合控制：20 ms更新IMU，5 ms计算平滑的融合转向。 */
-void RingTrack_UpdateGyro(float current_yaw);
-void RingTrack_CalculateHybridSteering(uint16_t period_ms);
-
 /* 将当前基础速度和转向修正量输出到左右电机。 */
 void RingTrack_OutputMotor(void);
 
 /* 当全部传感器都未检测到黑线时返回 true。 */
 bool RingTrack_IsLineLost(void);
 
-/* 编码器到达第一段1.5 m直线终点时返回true。 */
-bool RingTrack_FirstStraightComplete(void);
-
 /* 丢线时保持、搜索或故障停车。 */
 void RingTrack_HandleLineLost(uint16_t period_ms);
 
-/* task2起步1秒后，至少4路探头同时识别黑线时启动反推急停。 */
+/* task2起步1秒后，至少3路探头同时识别黑线时立即抱刹。 */
 bool RingTrack_CheckFinish(uint16_t period_ms);
-
-/* task2反推急停过程；反推结束后自动抱刹并返回true。 */
-bool RingTrack_UpdateEmergencyBrake(uint16_t period_ms);
 
 /*
  * 只检测是否再次通过A点横线，不控制电机。

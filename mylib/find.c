@@ -5,12 +5,12 @@
 
 /* ==================== 实车调节参数 ==================== */
 
-#define LAP_PULSES                  9000L   /* 按实车1.5 m直线重新标定整圈脉冲。 */
-#define START_SPEED                  23.04f  /* 当前28.8的0.8倍。 */
-#define HIGH_SPEED                   46.08f  /* 当前57.6的0.8倍。 */
-#define LOW_SPEED                    30.72f  /* 当前38.4的0.8倍。 */
-#define TRACK_KP                     4.0f    /* 降低微调力度，减少左右抖动。 */
-#define TRACK_KD                     5.6f    /* 与原参数同比降低到0.8倍。 */
+#define LAP_PULSES                  6000L   /* 一圈平均编码器脉冲数。 */
+#define START_SPEED                  36.0f   /* task2原起步速度24的1.5倍。 */
+#define HIGH_SPEED                   72.0f   /* task2原高速48的1.5倍。 */
+#define LOW_SPEED                    48.0f   /* 第二个弯道适当减速。 */
+#define TRACK_KP                     5.0f    /* 偏离黑线时的转向力度。 */
+#define TRACK_KD                     7.0f    /* 抑制车头快速摆动。 */
 #define TRACK_CENTER_OFFSET          2.0f    /* 实测RAW=0x86在车体中间，补偿数字中心偏差。 */
 #define FORWARD_SIGN                 1       /* 正速度后退时改为 -1。 */
 
@@ -24,55 +24,14 @@
 #define LINE_SENSOR_ADDRESS          0x5CU
 #define LINE_SENSOR_STATE_REG        0x05U
 #define SOFT_I2C_DELAY_CYCLES        320U
-#define SEARCH_SPEED                 11
-#define CORRECTION_MAX               19.2f
-#define CORRECTION_STEP              1.5f
+#define SEARCH_SPEED                 18
+#define CORRECTION_MAX               24.0f
+#define CORRECTION_STEP              2.0f
 #define MARK_SENSOR_COUNT            3U
 #define MARK_CONFIRM_MS              5U
 #define END_LINE_ARM_MS              1000U  /* 起步1秒后才允许把宽黑线当成终点。 */
 #define LOST_HOLD_MS                 50U
 #define LOST_STOP_MS                 400U
-#define TASK2_FINISH_SENSOR_COUNT    3U
-#define EMERGENCY_REVERSE_SPEED      35
-#define EMERGENCY_REVERSE_MS         60U
-
-/* ==================== task2预定轨迹参数 ==================== */
-
-/* 正数和负数分别代表两个弯道的预定差速方向，实车方向相反时交换符号。 */
-#define BC_PRESET_CORRECTION         -7.0f
-#define DA_PRESET_CORRECTION          7.0f
-#define BC_EXPECTED_POSITION         -3.0f
-#define DA_EXPECTED_POSITION          4.0f
-#define PRESET_ASSIST_DEADBAND        1.5f
-#define PRESET_ASSIST_KP              2.2f
-#define PRESET_ASSIST_MAX             8.0f
-#define PRESET_CHANGE_STEP            2.5f
-
-/* task2陀螺仪航向控制参数。 */
-#define GYRO_TURN_SIGN                1.0f
-#define GYRO_OUTPUT_SIGN              1.0f
-#define GYRO_HEADING_KP               0.18f
-#define GYRO_CURVE_FEEDFORWARD        5.0f
-#define GYRO_CORRECTION_MAX          12.0f
-#define GYRO_CHANGE_STEP              2.0f
-#define INFRARED_ASSIST_DEADBAND      2.0f
-#define INFRARED_ASSIST_KP            1.2f
-#define INFRARED_ASSIST_MAX           5.0f
-
-/* task2混合控制参数：红外定位、陀螺仪稳姿、弯道前馈。 */
-#define HYBRID_STRAIGHT_LINE_KP       1.2f
-#define HYBRID_CURVE_LINE_KP          1.8f
-#define HYBRID_STRAIGHT_YAW_KP        0.10f
-#define HYBRID_YAW_RATE_KP            0.06f
-#define HYBRID_TARGET_YAW_RATE       65.0f
-#define HYBRID_CURVE_FEEDFORWARD      5.0f
-#define HYBRID_STRAIGHT_MAX           5.0f
-#define HYBRID_CURVE_MAX             10.0f
-#define HYBRID_STRAIGHT_STEP          0.6f
-#define HYBRID_CURVE_STEP             0.9f
-#define HYBRID_OUTPUT_FILTER          0.35f
-#define HYBRID_STRAIGHT_CONFIRM_MS   10U
-#define HYBRID_CURVE_CONFIRM_MS       5U
 
 /* H1～H8：从车头前方看过去，依次为左到右。 */
 static const int8_t g_sensor_weight[SENSOR_COUNT] = {
@@ -95,20 +54,10 @@ typedef struct {
     uint16_t lost_ms;
     uint16_t mark_ms;
     uint16_t run_ms;
-    uint16_t emergency_brake_ms;
     bool end_line_armed;
 } RingTrackControl_t;
 
 static RingTrackControl_t g_track;
-static float g_gyro_last_raw_yaw = 0.0f;
-static float g_gyro_continuous_yaw = 0.0f;
-static float g_gyro_yaw_rate = 0.0f;
-static float g_hybrid_straight_yaw = 0.0f;
-static float g_hybrid_line_position = 0.0f;
-static float g_hybrid_candidate_position = 0.0f;
-static float g_hybrid_target_correction = 0.0f;
-static uint16_t g_hybrid_candidate_ms = 0U;
-static RingTrackState_t g_hybrid_last_state = RING_TRACK_IDLE;
 
 static float limit_float(float value, float minimum, float maximum)
 {
@@ -261,7 +210,6 @@ void RingTrack_Start(void)
     g_track.lost_ms = 0U;
     g_track.mark_ms = 0U;
     g_track.run_ms = 0U;
-    g_track.emergency_brake_ms = 0U;
     g_track.end_line_armed = false;
     Motor_Enable();
 }
@@ -432,304 +380,6 @@ void RingTrack_CalculateSteering(void)
                        CORRECTION_STEP, 0.0f);
 }
 
-void RingTrack_CalculatePresetSteering(void)
-{
-    float preset_correction = 0.0f;
-    float expected_position = 0.0f;
-    float position_error;
-    float assist_correction = 0.0f;
-    float target_correction;
-    float correction_change;
-    float steering_limit;
-
-    /* 编码器进入弯道时直接给预定差速，不等待红外先出现偏差。 */
-    if (g_track.state == RING_TRACK_BC) {
-        preset_correction = BC_PRESET_CORRECTION;
-        expected_position = BC_EXPECTED_POSITION;
-    } else if (g_track.state == RING_TRACK_DA) {
-        preset_correction = DA_PRESET_CORRECTION;
-        expected_position = DA_EXPECTED_POSITION;
-    }
-
-    position_error = g_track.raw_position - expected_position;
-
-    /* 偏差没有超过允许范围时，红外完全不参与，只执行预定轨迹。 */
-    if (position_error > PRESET_ASSIST_DEADBAND) {
-        assist_correction =
-            (position_error - PRESET_ASSIST_DEADBAND) * PRESET_ASSIST_KP;
-    } else if (position_error < -PRESET_ASSIST_DEADBAND) {
-        assist_correction =
-            (position_error + PRESET_ASSIST_DEADBAND) * PRESET_ASSIST_KP;
-    }
-    assist_correction = limit_float(
-        assist_correction, -PRESET_ASSIST_MAX, PRESET_ASSIST_MAX);
-
-    target_correction = preset_correction + assist_correction;
-    steering_limit = g_track.base_speed;
-    if (steering_limit < 0.0f) steering_limit = -steering_limit;
-    if (steering_limit > CORRECTION_MAX) steering_limit = CORRECTION_MAX;
-    target_correction = limit_float(
-        target_correction, -steering_limit, steering_limit);
-
-    /* 预定差速和辅助修正都采用限速变化，避免路段切换时车头突跳。 */
-    correction_change = limit_float(
-        target_correction - g_track.correction,
-        -PRESET_CHANGE_STEP, PRESET_CHANGE_STEP);
-    g_track.correction += correction_change;
-
-    g_track.left_speed = (int16_t)(g_track.base_speed - g_track.correction);
-    g_track.right_speed = (int16_t)(g_track.base_speed + g_track.correction);
-    if (g_track.left_speed > MOTOR_SPEED_MAX) g_track.left_speed = MOTOR_SPEED_MAX;
-    if (g_track.left_speed < MOTOR_SPEED_MIN) g_track.left_speed = MOTOR_SPEED_MIN;
-    if (g_track.right_speed > MOTOR_SPEED_MAX) g_track.right_speed = MOTOR_SPEED_MAX;
-    if (g_track.right_speed < MOTOR_SPEED_MIN) g_track.right_speed = MOTOR_SPEED_MIN;
-}
-
-void RingTrack_GyroReset(float initial_yaw)
-{
-    g_gyro_last_raw_yaw = initial_yaw;
-    g_gyro_continuous_yaw = 0.0f;
-    g_gyro_yaw_rate = 0.0f;
-    g_hybrid_straight_yaw = 0.0f;
-    g_hybrid_line_position = 0.0f;
-    g_hybrid_candidate_position = 0.0f;
-    g_hybrid_target_correction = 0.0f;
-    g_hybrid_candidate_ms = 0U;
-    g_hybrid_last_state = RING_TRACK_AB;
-}
-
-void RingTrack_CalculateGyroSteering(float current_yaw)
-{
-    const int32_t point_b = (LAP_PULSES * 2442L) / 10000L;
-    const int32_t point_c = LAP_PULSES / 2L;
-    const int32_t point_d = (LAP_PULSES * 7442L) / 10000L;
-    float yaw_change;
-    float target_yaw;
-    float segment_progress;
-    float heading_error;
-    float gyro_correction;
-    float infrared_correction = 0.0f;
-    float target_correction;
-    float correction_change;
-    float steering_limit;
-
-    /* 将IMU的-180～180度转换为一圈内连续变化的航向角。 */
-    yaw_change = current_yaw - g_gyro_last_raw_yaw;
-    while (yaw_change > 180.0f) yaw_change -= 360.0f;
-    while (yaw_change < -180.0f) yaw_change += 360.0f;
-    g_gyro_continuous_yaw += yaw_change;
-    g_gyro_last_raw_yaw = current_yaw;
-
-    /* 编码器给出赛道路段进度，陀螺仪负责跟随目标航向。 */
-    if (g_track.distance < point_b) {
-        target_yaw = 0.0f;
-    } else if (g_track.distance < point_c) {
-        segment_progress = (float)(g_track.distance - point_b) /
-                           (float)(point_c - point_b);
-        target_yaw = GYRO_TURN_SIGN * 180.0f * segment_progress;
-    } else if (g_track.distance < point_d) {
-        target_yaw = GYRO_TURN_SIGN * 180.0f;
-    } else {
-        segment_progress = (float)(g_track.distance - point_d) /
-                           (float)(LAP_PULSES - point_d);
-        if (segment_progress > 1.0f) segment_progress = 1.0f;
-        target_yaw = GYRO_TURN_SIGN *
-                     (180.0f + 180.0f * segment_progress);
-    }
-
-    heading_error = target_yaw - g_gyro_continuous_yaw;
-
-    if (g_track.state == RING_TRACK_AB ||
-        g_track.state == RING_TRACK_CD) {
-        /* 直线只由陀螺仪锁定0度或180度航向。 */
-        gyro_correction = GYRO_OUTPUT_SIGN *
-                          GYRO_HEADING_KP * heading_error;
-    } else {
-        /* 弯道完全执行预制固定差速，不使用陀螺仪追踪角度。 */
-        gyro_correction = GYRO_OUTPUT_SIGN * GYRO_TURN_SIGN *
-                          GYRO_CURVE_FEEDFORWARD;
-    }
-    gyro_correction = limit_float(
-        gyro_correction, -GYRO_CORRECTION_MAX, GYRO_CORRECTION_MAX);
-
-    /* 红外偏差明显超过中心后才参与，不干扰正常航向闭环。 */
-    if (g_track.black_count != 0U &&
-        g_track.raw_position > INFRARED_ASSIST_DEADBAND) {
-        infrared_correction =
-            (g_track.raw_position - INFRARED_ASSIST_DEADBAND) *
-            INFRARED_ASSIST_KP;
-    } else if (g_track.black_count != 0U &&
-               g_track.raw_position < -INFRARED_ASSIST_DEADBAND) {
-        infrared_correction =
-            (g_track.raw_position + INFRARED_ASSIST_DEADBAND) *
-            INFRARED_ASSIST_KP;
-    }
-    infrared_correction = limit_float(
-        infrared_correction, -INFRARED_ASSIST_MAX, INFRARED_ASSIST_MAX);
-
-    /* task2中红外只判断在线和启停线，不叠加到方向控制。 */
-    infrared_correction = 0.0f;
-
-    target_correction = gyro_correction + infrared_correction;
-    steering_limit = g_track.base_speed;
-    if (steering_limit < 0.0f) steering_limit = -steering_limit;
-    if (steering_limit > CORRECTION_MAX) steering_limit = CORRECTION_MAX;
-    target_correction = limit_float(
-        target_correction, -steering_limit, steering_limit);
-
-    correction_change = limit_float(
-        target_correction - g_track.correction,
-        -GYRO_CHANGE_STEP, GYRO_CHANGE_STEP);
-    g_track.correction += correction_change;
-
-    g_track.left_speed = (int16_t)(g_track.base_speed - g_track.correction);
-    g_track.right_speed = (int16_t)(g_track.base_speed + g_track.correction);
-    if (g_track.left_speed > MOTOR_SPEED_MAX) g_track.left_speed = MOTOR_SPEED_MAX;
-    if (g_track.left_speed < MOTOR_SPEED_MIN) g_track.left_speed = MOTOR_SPEED_MIN;
-    if (g_track.right_speed > MOTOR_SPEED_MAX) g_track.right_speed = MOTOR_SPEED_MAX;
-    if (g_track.right_speed < MOTOR_SPEED_MIN) g_track.right_speed = MOTOR_SPEED_MIN;
-}
-
-void RingTrack_UpdateGyro(float current_yaw)
-{
-    float yaw_change = current_yaw - g_gyro_last_raw_yaw;
-    float measured_yaw_rate;
-
-    while (yaw_change > 180.0f) yaw_change -= 360.0f;
-    while (yaw_change < -180.0f) yaw_change += 360.0f;
-
-    g_gyro_continuous_yaw += yaw_change;
-    g_gyro_last_raw_yaw = current_yaw;
-
-    /* IMU固定每20 ms更新，角度差换算为度每秒并做低通滤波。 */
-    measured_yaw_rate = yaw_change / 0.020f;
-    g_gyro_yaw_rate = 0.70f * g_gyro_yaw_rate +
-                      0.30f * measured_yaw_rate;
-}
-
-void RingTrack_CalculateHybridSteering(uint16_t period_ms)
-{
-    const int32_t point_b = (LAP_PULSES * 2442L) / 10000L;
-    const int32_t point_c = LAP_PULSES / 2L;
-    const int32_t point_d = (LAP_PULSES * 7442L) / 10000L;
-    bool curve = (g_track.state == RING_TRACK_BC ||
-                  g_track.state == RING_TRACK_DA);
-    uint16_t confirm_ms = curve ? HYBRID_CURVE_CONFIRM_MS :
-                                  HYBRID_STRAIGHT_CONFIRM_MS;
-    float line_kp = curve ? HYBRID_CURVE_LINE_KP :
-                            HYBRID_STRAIGHT_LINE_KP;
-    float correction_limit = curve ? HYBRID_CURVE_MAX :
-                                     HYBRID_STRAIGHT_MAX;
-    float correction_step = curve ? HYBRID_CURVE_STEP :
-                                    HYBRID_STRAIGHT_STEP;
-    float line_correction = 0.0f;
-    float gyro_correction = 0.0f;
-    float feedforward = 0.0f;
-    float curve_progress = 0.0f;
-    float curve_envelope = 0.0f;
-    float target_yaw_rate = 0.0f;
-    float desired_correction;
-    float target_change;
-    float steering_limit;
-
-    /* 数字探头必须连续保持同一位置后才更新，过滤单帧跳变。 */
-    if (g_track.black_count != 0U) {
-        if (g_track.raw_position > g_hybrid_candidate_position - 0.25f &&
-            g_track.raw_position < g_hybrid_candidate_position + 0.25f) {
-            if (g_hybrid_candidate_ms < confirm_ms) {
-                g_hybrid_candidate_ms += period_ms;
-            }
-        } else {
-            g_hybrid_candidate_position = g_track.raw_position;
-            g_hybrid_candidate_ms = period_ms;
-        }
-
-        if (g_hybrid_candidate_ms >= confirm_ms) {
-            g_hybrid_line_position = g_hybrid_candidate_position;
-        }
-    } else {
-        /* 短暂丢线时逐渐撤掉红外修正，陀螺仪继续保持车头稳定。 */
-        g_hybrid_candidate_ms = 0U;
-        g_hybrid_line_position *= 0.85f;
-    }
-
-    /* 中心附近留死区，避免探头边缘跳变引起持续摆动。 */
-    if (g_hybrid_line_position > 0.5f) {
-        line_correction =
-            (g_hybrid_line_position - 0.5f) * line_kp;
-    } else if (g_hybrid_line_position < -0.5f) {
-        line_correction =
-            (g_hybrid_line_position + 0.5f) * line_kp;
-    }
-
-    /* 进入新的直线时锁住实际航向，避免强追理论180度造成突转。 */
-    if (!curve && (g_hybrid_last_state == RING_TRACK_BC ||
-                   g_hybrid_last_state == RING_TRACK_DA)) {
-        g_hybrid_straight_yaw = g_gyro_continuous_yaw;
-    }
-
-    if (!curve) {
-        gyro_correction = GYRO_OUTPUT_SIGN * HYBRID_STRAIGHT_YAW_KP *
-                          (g_hybrid_straight_yaw -
-                           g_gyro_continuous_yaw);
-    } else {
-        /* 弯道入口和出口各15%平滑增减差速，中段保持预制转向。 */
-        if (g_track.state == RING_TRACK_BC) {
-            curve_progress = (float)(g_track.distance - point_b) /
-                             (float)(point_c - point_b);
-        } else {
-            curve_progress = (float)(g_track.distance - point_d) /
-                             (float)(LAP_PULSES - point_d);
-        }
-        if (curve_progress < 0.0f) curve_progress = 0.0f;
-        if (curve_progress > 1.0f) curve_progress = 1.0f;
-
-        if (curve_progress < 0.15f) {
-            curve_envelope = curve_progress / 0.15f;
-        } else if (curve_progress > 0.85f) {
-            curve_envelope = (1.0f - curve_progress) / 0.15f;
-        } else {
-            curve_envelope = 1.0f;
-        }
-
-        feedforward = GYRO_OUTPUT_SIGN * GYRO_TURN_SIGN *
-                      HYBRID_CURVE_FEEDFORWARD * curve_envelope;
-        target_yaw_rate = GYRO_TURN_SIGN *
-                          HYBRID_TARGET_YAW_RATE * curve_envelope;
-        gyro_correction = GYRO_OUTPUT_SIGN * HYBRID_YAW_RATE_KP *
-                          (target_yaw_rate - g_gyro_yaw_rate);
-    }
-    g_hybrid_last_state = g_track.state;
-
-    desired_correction = feedforward + line_correction + gyro_correction;
-    desired_correction = limit_float(
-        desired_correction, -correction_limit, correction_limit);
-
-    /* 第一级限制目标转向变化速度。 */
-    target_change = limit_float(
-        desired_correction - g_hybrid_target_correction,
-        -correction_step, correction_step);
-    g_hybrid_target_correction += target_change;
-
-    /* 第二级低通实际输出，进一步降低钢球受到的横向冲击。 */
-    g_track.correction += HYBRID_OUTPUT_FILTER *
-                          (g_hybrid_target_correction -
-                           g_track.correction);
-
-    steering_limit = g_track.base_speed;
-    if (steering_limit < 0.0f) steering_limit = -steering_limit;
-    if (steering_limit > correction_limit) steering_limit = correction_limit;
-    g_track.correction = limit_float(
-        g_track.correction, -steering_limit, steering_limit);
-
-    g_track.left_speed = (int16_t)(g_track.base_speed - g_track.correction);
-    g_track.right_speed = (int16_t)(g_track.base_speed + g_track.correction);
-    if (g_track.left_speed > MOTOR_SPEED_MAX) g_track.left_speed = MOTOR_SPEED_MAX;
-    if (g_track.left_speed < MOTOR_SPEED_MIN) g_track.left_speed = MOTOR_SPEED_MIN;
-    if (g_track.right_speed > MOTOR_SPEED_MAX) g_track.right_speed = MOTOR_SPEED_MAX;
-    if (g_track.right_speed < MOTOR_SPEED_MIN) g_track.right_speed = MOTOR_SPEED_MIN;
-}
-
 void RingTrack_OutputMotor(void)
 {
     Motor_SetSpeed(FORWARD_SIGN * g_track.left_speed,
@@ -739,12 +389,6 @@ void RingTrack_OutputMotor(void)
 bool RingTrack_IsLineLost(void)
 {
     return g_track.black_count == 0U;
-}
-
-bool RingTrack_FirstStraightComplete(void)
-{
-    const int32_t point_b = (LAP_PULSES * 2442L) / 10000L;
-    return g_track.distance >= point_b;
 }
 
 void RingTrack_HandleLineLost(uint16_t period_ms)
@@ -801,31 +445,8 @@ bool RingTrack_EndLineDetected(uint16_t period_ms)
 
 bool RingTrack_CheckFinish(uint16_t period_ms)
 {
-    /* 至少三路同时压到启停线就触发task2急停。 */
-    if (g_track.distance < ((LAP_PULSES * 8L) / 10L)) {
-        return false;
-    }
-    if (!RingTrack_MarkerDetected(TASK2_FINISH_SENSOR_COUNT, period_ms)) {
-        return false;
-    }
-
-    g_track.emergency_brake_ms = 0U;
-    g_track.state = RING_TRACK_EMERGENCY_BRAKING;
-    Motor_SetSpeed(-FORWARD_SIGN * EMERGENCY_REVERSE_SPEED,
-                   -FORWARD_SIGN * EMERGENCY_REVERSE_SPEED);
-    return true;
-}
-
-bool RingTrack_UpdateEmergencyBrake(uint16_t period_ms)
-{
-    if (g_track.state != RING_TRACK_EMERGENCY_BRAKING) {
-        return g_track.state == RING_TRACK_FINISHED;
-    }
-
-    if (g_track.emergency_brake_ms < EMERGENCY_REVERSE_MS) {
-        g_track.emergency_brake_ms += period_ms;
-    }
-    if (g_track.emergency_brake_ms < EMERGENCY_REVERSE_MS) {
+    /* 至少三路同时压到启停线，当前5 ms控制周期内立即抱刹。 */
+    if (!RingTrack_EndLineDetected(period_ms)) {
         return false;
     }
 

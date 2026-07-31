@@ -3,45 +3,43 @@
 #include "mylib/find.h"
 #include "mylib/key.h"
 #include "mylib/oled.h"
-#include "mylib/IMU.h"
-#include "mylib/delay.h"
 #include <stdint.h>
 
 /* ==================== 环形循迹参数 ==================== */
 
 #define RING_PERIOD_MS             5U
-#define RING_START_SPEED           15.36f
-#define RING_HIGH_SPEED            30.72f
-#define RING_LOW_SPEED             23.04f
-#define RING_SEARCH_SPEED          11
-#define RING_KP                    4.0f
-#define RING_KD                    5.6f
-#define RING_CORRECTION_MAX        19.2f
-#define RING_CORRECTION_STEP       1.5f
+#define RING_START_SPEED           36.0f
+#define RING_HIGH_SPEED            72.0f
+#define RING_LOW_SPEED             48.0f
+#define RING_SEARCH_SPEED          18
+#define RING_KP                    5.0f
+#define RING_KD                    7.0f
+#define RING_CORRECTION_MAX        24.0f
+#define RING_CORRECTION_STEP       2.0f
 #define RING_MARK_COUNT            6U
 #define RING_MARK_CONFIRM_MS       25U
 #define RING_LOST_HOLD_MS          50U
 #define RING_LOST_STOP_MS          400U
-#define RING_LAP_PULSES            9000L
+#define RING_LAP_PULSES            6000L
 #define RING_FORWARD_SIGN          1
 
 /* ==================== 第四问A到B循迹参数 ==================== */
 
 #define TASK4_PERIOD_MS            5U
-#define TASK4_START_SPEED          12.8f
-#define TASK4_CRUISE_SPEED         22.4f
-#define TASK4_ACCEL_END_MS         3125U
-#define TASK4_DECEL_START_MS       11406U
-#define TASK4_SLOW_SPEED           17.92f
-#define TASK4_DECEL_END_MS         13281U
+#define TASK4_START_SPEED          20.0f
+#define TASK4_CRUISE_SPEED         35.0f
+#define TASK4_ACCEL_END_MS         2000U
+#define TASK4_DECEL_START_MS       7300U
+#define TASK4_SLOW_SPEED           28.0f
+#define TASK4_DECEL_END_MS         8500U
 #define TASK4_STOP_DELAY_MS        1000U
 
 /* ==================== 第五问整圈循迹参数 ==================== */
 
 /* task5同样每5 ms进行一次传感器读取和PD循迹。 */
 #define TASK5_PERIOD_MS            5U
-#define TASK5_START_SPEED          12.8f
-#define TASK5_CRUISE_SPEED         22.4f
+#define TASK5_START_SPEED          20.0f
+#define TASK5_CRUISE_SPEED         35.0f
 #define TASK5_ACCEL_TIME_MS        2000U
 #define TASK5_STOP_DELAY_MS        1000U
 #define TASK5_FINISH_ENABLE_MS     20000U
@@ -69,8 +67,6 @@ static volatile uint32_t g_ms_tick = 0U;
 static uint32_t g_task2_start_ms = 0U;
 static uint32_t g_task2_last_ms = 0U;
 static uint8_t g_task2_started = 0U;
-static uint32_t g_task2_imu_last_ms = 0U;
-static float g_task2_ypr[3] = {0.0f, 0.0f, 0.0f};
 static uint32_t g_task4_start_ms = 0U;
 static uint32_t g_task4_last_ms = 0U;
 static uint8_t g_task4_started = 0U;
@@ -97,21 +93,12 @@ static float task5_get_running_speed(uint32_t elapsed_ms);
 
 int main(void)
 {
-    uint16_t imu_sample;
-
     /* 初始化 SysConfig 中配置的 GPIO、PWM和定时器。 */
     SYSCFG_DL_init();
 
     /* 复位后初始化OLED，并把行程时间清零。 */
     OLED_Init();
     OLED_RunTimeReset();
-
-    /* 上电时保持车体静止约2秒，让陀螺仪完成零偏学习。 */
-    IMU_init();
-    for (imu_sample = 0U; imu_sample < 100U; ++imu_sample) {
-        IMU_getYawPitchRoll(g_task2_ypr);
-        delay_ms(20U);
-    }
 
     /* 初始化编码器和环形循迹模块，然后保持停车。 */
     Motor_Encoder_Init();
@@ -197,7 +184,7 @@ void TIMER_0_INST_IRQHandler(void)
 {
     switch (DL_TimerG_getPendingInterrupt(TIMER_0_INST)) {
     case DL_TIMER_IIDX_ZERO:
-        /* I2C读取不能放在中断中；task2主循环每20 ms读取一次IMU。 */
+        /* I2C读取放在主循环中，中断里不执行耗时通信。 */
         break;
     default:
         break;
@@ -222,28 +209,12 @@ void task2(void)
         OLED_RunTimeReset();
         g_task2_start_ms = g_ms_tick;
         g_task2_last_ms = g_ms_tick;
-        IMU_getYawPitchRoll(g_task2_ypr);
-        g_task2_imu_last_ms = g_ms_tick;
-        RingTrack_GyroReset(g_task2_ypr[0]);
         g_task2_started = 1U;
         g_task4_started = 0U;
         return;
     }
 
     /* 检出启停线后反推60 ms，再抱刹并冻结最终行程时间。 */
-    if (RingTrack_GetState() == RING_TRACK_EMERGENCY_BRAKING) {
-        if ((uint32_t)(g_ms_tick - g_task2_last_ms) <
-            RING_TRACK_PERIOD_MS) {
-            return;
-        }
-        g_task2_last_ms += RING_TRACK_PERIOD_MS;
-        if (RingTrack_UpdateEmergencyBrake(RING_TRACK_PERIOD_MS)) {
-            OLED_ShowRunTime(
-                (uint32_t)(g_ms_tick - g_task2_start_ms), 0U);
-        }
-        return;
-    }
-
     /* 已完成一圈或因丢线故障停车后，保持停车直到重新选择任务。 */
     if (RingTrack_GetState() == RING_TRACK_FINISHED ||
         RingTrack_GetState() == RING_TRACK_FAULT) {
@@ -261,24 +232,28 @@ void task2(void)
     /* 1. 通过I2C读取六路红外探头和编码器里程。 */
     RingTrack_ReadSensors();
 
-    /* IMU算法每20 ms更新一次，5 ms电机周期复用最近航向。 */
-    if ((uint32_t)(g_ms_tick - g_task2_imu_last_ms) >= 20U) {
-        g_task2_imu_last_ms += 20U;
-        IMU_getYawPitchRoll(g_task2_ypr);
-        RingTrack_UpdateGyro(g_task2_ypr[0]);
-    }
-
     /* 2. 起步1秒后，检测到终点横线时停车；不依赖编码器里程。 */
     if (RingTrack_CheckFinish(RING_TRACK_PERIOD_MS)) {
+        OLED_ShowRunTime(
+            (uint32_t)(g_ms_tick - g_task2_start_ms), 0U);
         return;
     }
 
     /* 3. 丢线时执行保持、搜索或故障停车，不再进行正常循迹。 */
+    if (RingTrack_IsLineLost()) {
+        RingTrack_HandleLineLost(RING_TRACK_PERIOD_MS);
+        if (RingTrack_GetState() == RING_TRACK_FAULT) {
+            OLED_ShowRunTime(
+                (uint32_t)(g_ms_tick - g_task2_start_ms), 0U);
+        }
+        return;
+    }
+
     /* 4. 更新分段匀速变化的基础速度。 */
     RingTrack_UpdateSpeedProfile();
 
     /* 5. 按预定路段差速前进，红外只在偏差较大时辅助纠正。 */
-    RingTrack_CalculateHybridSteering(RING_TRACK_PERIOD_MS);
+    RingTrack_CalculateSteering();
     RingTrack_OutputMotor();
 }
 
@@ -311,7 +286,7 @@ static float task4_get_base_speed(uint32_t elapsed_ms)
     return TASK4_SLOW_SPEED;
 }
 
-/* 第四问循迹：再次降速后约11.406秒通过AB，再循迹1秒刹停。 */
+/* task4：约7.3秒完成AB，继续正常循迹1秒后立即刹停。 */
 void task4(void)
 {
     uint32_t elapsed_ms;
@@ -346,8 +321,8 @@ void task4(void)
     /* 1. 通过I2C读取六路红外探头。 */
     RingTrack_ReadSensors();
 
-    /* 编码器确认完成第一段1.5 m直线后立即结束task4。 */
-    if (RingTrack_FirstStraightComplete()) {
+    /* 到达AB预计完成时间后再运行1秒，总计约8.3秒时刹停。 */
+    if (elapsed_ms >= (TASK4_DECEL_START_MS + TASK4_STOP_DELAY_MS)) {
         Motor_Brake();
         g_task4_finished = 1U;
         OLED_ShowRunTime(elapsed_ms, 0U);
@@ -396,7 +371,7 @@ static float task5_get_running_speed(uint32_t elapsed_ms)
 
 /*
  * 第五问：KEY4启动。
- * 匀加速到22.4后保持该速度完成整圈；再次通过A点后延时1秒停车。
+ * 从20匀加速到35并保持；再次通过A点后继续循迹1秒再停车。
  */
 void task5(void)
 {
@@ -553,5 +528,3 @@ void task6(void)
     RingTrack_CalculateSteering();
     RingTrack_OutputMotor();
 }
-
-
