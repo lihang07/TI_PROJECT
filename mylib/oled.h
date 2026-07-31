@@ -2,7 +2,8 @@
 #define __OLED_H 
 
 
-#include "stdlib.h"	
+#include "stdlib.h"
+#include <stdint.h>
 
 
 
@@ -202,5 +203,11 @@ void OLED_ShowFloat(u8 x, u8 y, float num, u8 int_len, u8 dec_len, u8 size1);
  *       必须在使用OLED其他函数之前调用
  *       初始化流程包括: 关闭显示→设置时钟→设置显存模式→开启电荷泵→清屏 */
 void OLED_Init(void);
+
+/* 清零行程计时显示；MCU复位或开始新任务时调用。 */
+void OLED_RunTimeReset(void);
+
+/* 显示行程时间；running=1实时计时，running=0冻结并显示最终用时。 */
+void OLED_ShowRunTime(uint32_t elapsed_ms, uint8_t running);
 
 #endif

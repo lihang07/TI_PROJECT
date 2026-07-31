@@ -17,6 +17,11 @@
  * ============================================ */
 u8 OLED_GRAM[144][8];
 
+/* 记录上次显示值，确保OLED最多每秒刷新一次，不拖慢循迹周期。 */
+static uint32_t g_oled_last_time_seconds = 0xFFFFFFFFU;
+static uint8_t g_oled_last_running = 0xFFU;
+static uint32_t g_oled_stopped_time_ms = 0U;
+
 /* ============================================
  * OLED_ColorTurn: 设置显示颜色模式
  * 参数: i - 0=正常显示, 1=反色显示
@@ -887,4 +892,71 @@ void OLED_Init(void)
 	OLED_WR_Byte(0xAF,OLED_CMD);  /* 0xAF: 开启显示(Display ON) */
 	
 	OLED_Clear();   /* 清屏，确保初始状态干净 */
+}
+
+void OLED_RunTimeReset(void)
+{
+    g_oled_last_time_seconds = 0xFFFFFFFFU;
+    g_oled_last_running = 0xFFU;
+    g_oled_stopped_time_ms = 0U;
+    OLED_ShowRunTime(0U, 0U);
+}
+
+/*
+ * 只刷新计时文字占用的一页。
+ * 每个字节沿用原OLED_Refresh的发送方式，保证软件I2C应答时序可靠，
+ * 避免16像素字体的第二页没有写入而只显示上半个字符。
+ */
+static void OLED_RefreshRunTimePage(u8 page)
+{
+    u8 x;
+
+    OLED_WR_Byte((u8)(0xB0U + page), OLED_CMD);
+    OLED_WR_Byte(0x00U, OLED_CMD);
+    OLED_WR_Byte(0x10U, OLED_CMD);
+    for (x = 0U; x < 128U; ++x) {
+        OLED_WR_Byte(OLED_GRAM[x][page], OLED_DATA);
+    }
+}
+
+void OLED_ShowRunTime(uint32_t elapsed_ms, uint8_t running)
+{
+    uint32_t displayed_seconds;
+    uint32_t seconds;
+
+    running = (running != 0U) ? 1U : 0U;
+
+    /* 从运行切换到停止时锁存最终时间，之后保持该结果不再增加。 */
+    if (running == 0U) {
+        if (g_oled_last_running == 1U) {
+            g_oled_stopped_time_ms = elapsed_ms;
+        }
+        elapsed_ms = g_oled_stopped_time_ms;
+    }
+
+    displayed_seconds = elapsed_ms / 1000U;
+    if (displayed_seconds == g_oled_last_time_seconds &&
+        running == g_oled_last_running) {
+        return;
+    }
+
+    g_oled_last_time_seconds = displayed_seconds;
+    g_oled_last_running = running;
+    seconds = displayed_seconds;
+    if (seconds > 999U) seconds = 999U;
+
+    OLED_ShowString(0U, 0U, (u8 *)"TIME:", 16U);
+    OLED_ShowNum(48U, 0U, seconds, 3U, 16U);
+    OLED_ShowChar(72U, 0U, 's', 16U);
+    OLED_ShowString(80U, 0U, (u8 *)"   ", 16U);
+
+    if (running != 0U) {
+        OLED_ShowString(0U, 24U, (u8 *)"STATE: RUNNING ", 16U);
+    } else {
+        OLED_ShowString(0U, 24U, (u8 *)"STATE: STOPPED ", 16U);
+    }
+    OLED_RefreshRunTimePage(0U);
+    OLED_RefreshRunTimePage(1U);
+    OLED_RefreshRunTimePage(3U);
+    OLED_RefreshRunTimePage(4U);
 }
